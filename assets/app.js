@@ -3,8 +3,10 @@
    --------------------------------------------------------------------------
    Charge les fichiers data/*.json (générés par scripts/fetch_and_process.py)
    et simule, pour une date/heure donnée, la position de chaque véhicule en
-   service en interpolant linéairement entre ses deux arrêts encadrants
-   (le long du tracé réel de la ligne quand il est disponible).
+   service en interpolant entre ses deux arrêts encadrants (le long du tracé
+   réel de la ligne quand il est disponible), en marquant un temps d'arrêt à
+   quai (réel si fourni par le GTFS, sinon une pause minimale imposée — voir
+   MIN_DWELL_SECONDS plus bas) plutôt qu'un glissement continu.
 
    Format des données (voir scripts/fetch_and_process.py pour le détail) :
      routes.json   : { route_id: {short_name, long_name, type, color, text_color} }
@@ -14,8 +16,8 @@
      calendar_dates.json : [ {service_id, date:'YYYYMMDD', exception_type} ]
      trips.json    : [ [trip_id, route_id, service_id, shape_id|null,
                          direction_id, headsign, stops] ]
-       - avec tracé : stops = [[time_sec, dist_km], ...]
-       - sans tracé : stops = [[time_sec, lon, lat], ...]
+       - avec tracé : stops = [[arr_sec, dep_sec, dist_km], ...]
+       - sans tracé : stops = [[arr_sec, dep_sec, lon, lat], ...]
      stop_shape_index.json : { route_short_name: { stop_id: [shape_id, dist_km] } }
        (sert uniquement au mode "temps réel manuel" ci-dessous)
 
@@ -231,7 +233,7 @@
       if (!trips) continue;
       for (const t of trips) {
         const stops = t[6];
-        if (stops[stops.length - 1][0] >= 86400) {
+        if (stops[stops.length - 1][1] >= 86400) {
           candidates.push({ trip: t, offset: 86400 });
         }
       }
@@ -271,6 +273,15 @@
     return [a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2])];
   }
 
+  // Temps d'arrêt minimum imposé visuellement à chaque station (en secondes),
+  // même quand le GTFS ne distingue pas arrival_time et departure_time (cas
+  // de la grande majorité des arrêts STIB). Si le flux fournit un dwell réel
+  // plus long, c'est celui-ci qui prime. On ne le laisse jamais dépasser
+  // MIN_DWELL_MAX_FRACTION du temps de trajet vers l'arrêt suivant, pour ne
+  // pas créer d'arrêts absurdes sur des sauts très courts entre deux points.
+  const MIN_DWELL_SECONDS = 12;
+  const MIN_DWELL_MAX_FRACTION = 0.4;
+
   function computeFeatures() {
     const secOfDay =
       state.simTime.getHours() * 3600 +
@@ -283,24 +294,43 @@
       const [tripId, routeId, , shapeId, directionId, headsign, stops] = t;
       const compareTime = secOfDay + c.offset;
       const firstT = stops[0][0];
-      const lastT = stops[stops.length - 1][0];
+      const lastT = stops[stops.length - 1][1];
       if (compareTime < firstT || compareTime > lastT) continue;
 
       const idx = bracketIndexInStops(stops, compareTime);
       const s0 = stops[idx];
       const s1 = stops[Math.min(idx + 1, stops.length - 1)];
-      const span = s1[0] - s0[0];
-      const f = span > 0 ? (compareTime - s0[0]) / span : 0;
+
+      // s0 = [arrivalSec, departureSec, ...position]. Tant que compareTime
+      // est compris dans la fenêtre d'arrêt (réelle ou minimale imposée), le
+      // véhicule reste figé sur la position de s0 au lieu de continuer à
+      // glisser vers s1.
+      const totalSpan = s1[0] - s0[0];
+      const realDwell = Math.max(0, s0[1] - s0[0]);
+      const dwell =
+        totalSpan > 0
+          ? Math.min(Math.max(realDwell, MIN_DWELL_SECONDS), totalSpan * MIN_DWELL_MAX_FRACTION)
+          : 0;
+
+      let f;
+      if (totalSpan <= 0) {
+        f = 0;
+      } else if (compareTime - s0[0] < dwell) {
+        f = 0; // encore à quai
+      } else {
+        const travelSpan = totalSpan - dwell;
+        f = travelSpan > 0 ? (compareTime - s0[0] - dwell) / travelSpan : 1;
+      }
 
       let lon, lat;
       if (shapeId) {
         const shape = shapesData[shapeId];
         if (!shape) continue;
-        const d = s0[1] + f * (s1[1] - s0[1]);
+        const d = s0[2] + f * (s1[2] - s0[2]);
         [lon, lat] = positionOnShape(shape, d);
       } else {
-        lon = s0[1] + f * (s1[1] - s0[1]);
-        lat = s0[2] + f * (s1[2] - s0[2]);
+        lon = s0[2] + f * (s1[2] - s0[2]);
+        lat = s0[3] + f * (s1[3] - s0[3]);
       }
 
       const route = routesData[routeId] || {};
