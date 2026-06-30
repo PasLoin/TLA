@@ -41,8 +41,8 @@
   const DATA_BASE = "data/";
   const UPDATE_INTERVAL_MS = 1000; // fréquence de recalcul des positions
 
-
   const REALTIME_PROXY_URL = "https://stib-realtime-proxy.pulpfiction4651694.workers.dev" // ;
+
   const ROUTE_TYPE_RADIUS = { 0: 6, 1: 7, 3: 5 }; // tram, métro, bus
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
 
@@ -579,8 +579,7 @@
     try {
       const params = new URLSearchParams({
         dataset: "WaitingTimes",
-        where: `pointid="${boardState.stopId}"`,
-        limit: "50",
+        pointid: boardState.stopId,
       });
       const res = await fetch(`${REALTIME_PROXY_URL}?${params.toString()}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Réponse ${res.status}`);
