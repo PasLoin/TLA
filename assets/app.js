@@ -41,10 +41,8 @@
   const DATA_BASE = "data/";
   const UPDATE_INTERVAL_MS = 1000; // fréquence de recalcul des positions
 
-  // URL de ton Worker Cloudflare (proxy sécurisé pour l'API temps réel).
-  // Laisse à null pour désactiver le bouton "temps réel" tant qu'il n'est
-  // pas configuré.
-  const REALTIME_PROXY_URL = "https://stib-realtime-proxy.pulpfiction4651694.workers.dev" // 
+
+  const REALTIME_PROXY_URL = "https://stib-realtime-proxy.pulpfiction4651694.workers.dev" // ;
 
   const ROUTE_TYPE_RADIUS = { 0: 6, 1: 7, 3: 5 }; // tram, métro, bus
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
@@ -414,7 +412,7 @@
     if (status) status.textContent = "Appel de l'API en cours…";
 
     try {
-      const res = await fetch(REALTIME_PROXY_URL, { cache: "no-store" });
+      const res = await fetch(`${REALTIME_PROXY_URL}?dataset=VehiclePositions`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Réponse ${res.status}`);
       const data = await res.json();
       const features = realtimeFeaturesFromResults(data.results || []);
@@ -444,6 +442,164 @@
     realtimeState.count = 0;
     const status = document.getElementById("realtimeStatus");
     if (status) status.textContent = "Aucune donnée temps réel chargée.";
+  }
+
+  // ------------------------------------------------------------------------
+  // Panneau d'attente (façon afficheur de quai) — clic sur un arrêt
+  // ------------------------------------------------------------------------
+  //
+  // ⚠️ Le format exact de l'API WaitingTimes n'a pas pu être vérifié contre
+  // une vraie réponse (la doc OpenAPI fournie est un gabarit générique,
+  // identique à celle de VehiclePositions qui s'est révélée différente du
+  // format réel une fois testée). Le parsing ci-dessous est une estimation
+  // raisonnable basée sur le format connu des API STIB classiques
+  // (résultats groupés par arrêt, avec un champ "passingtimes" contenant un
+  // tableau JSON imbriqué de { destination: {fr, nl}, expectedArrivalTime,
+  // lineId }). Teste avec un vrai arrêt et regarde la console (le JSON brut
+  // y est toujours affiché) — si l'affichage est vide ou incorrect alors
+  // que la console montre des données, le format diffère et le parsing est
+  // à ajuster.
+
+  const boardState = { stopId: null, stopName: null, fetching: false };
+
+  function openBoard(stopId, stopName) {
+    boardState.stopId = stopId;
+    boardState.stopName = stopName;
+    const board = document.getElementById("departureBoard");
+    const nameEl = document.getElementById("boardStopName");
+    const status = document.getElementById("boardStatus");
+    const list = document.getElementById("boardList");
+    if (!board) return;
+    board.classList.remove("hidden");
+    if (nameEl) nameEl.textContent = stopName || stopId;
+    if (list) list.innerHTML = "";
+    if (status) {
+      status.textContent = REALTIME_PROXY_URL
+        ? "Clique sur Rafraîchir pour voir les prochains passages."
+        : "Proxy temps réel non configuré (REALTIME_PROXY_URL).";
+    }
+  }
+
+  function closeBoard() {
+    const board = document.getElementById("departureBoard");
+    if (board) board.classList.add("hidden");
+    boardState.stopId = null;
+  }
+
+  function parseWaitingTimes(json) {
+    // Format confirmé contre une vraie réponse de l'API le 30/06/2026 :
+    // results: [{ pointid, lineid, passingtimes: "[{destination:{fr,nl},
+    // expectedArrivalTime, lineId, message?:{fr,nl,en,de}}, ...]" }]
+    // On garde quelques replis de casse par prudence (ça ne coûte rien),
+    // on déduplique (l'API renvoie parfois deux entrées identiques pour une
+    // même ligne déviée) et on remonte le message de perturbation s'il y en
+    // a un.
+    const out = [];
+    const seen = new Set();
+    const results = json.results || json.Results || [];
+    for (const entry of results) {
+      const rawTimes =
+        entry.passingtimes ?? entry.passingTimes ?? entry.waitingtimes ?? entry.waitingTimes;
+      let times = null;
+      if (typeof rawTimes === "string") {
+        try { times = JSON.parse(rawTimes); } catch (e) { times = null; }
+      } else if (Array.isArray(rawTimes)) {
+        times = rawTimes;
+      }
+      if (!times) continue;
+      for (const t of times) {
+        const lineid = entry.lineid ?? entry.lineId ?? t.lineId ?? t.lineid ?? "";
+        const dest =
+          (t.destination && (t.destination.fr || t.destination.nl)) ||
+          t.destination || t.headsign || "";
+        const expected =
+          t.expectedArrivalTime || t.expectedDepartureTime || t.arrivalTime || null;
+        const note = t.message && (t.message.fr || t.message.nl || t.message.en) || null;
+
+        const dedupeKey = `${lineid}|${dest}|${expected}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        out.push({ lineid: String(lineid), destination: dest, expected, note });
+      }
+    }
+    out.sort((a, b) => {
+      const ta = a.expected ? Date.parse(a.expected) : Infinity;
+      const tb = b.expected ? Date.parse(b.expected) : Infinity;
+      return ta - tb;
+    });
+    return out;
+  }
+
+  function minutesUntil(isoString) {
+    if (!isoString) return null;
+    const t = new Date(isoString).getTime();
+    if (Number.isNaN(t)) return null;
+    return Math.round((t - Date.now()) / 60000);
+  }
+
+  function renderBoard(entries) {
+    const list = document.getElementById("boardList");
+    if (!list) return;
+    list.innerHTML = "";
+    if (entries.length === 0) {
+      const li = document.createElement("li");
+      li.className = "board-empty";
+      li.textContent = "Aucun passage annoncé pour le moment.";
+      list.appendChild(li);
+      return;
+    }
+    for (const e of entries) {
+      const routeMeta = resolveRouteMeta(e.lineid);
+      const color = "#" + ((routeMeta && routeMeta.color) || "1d4ed8");
+      const textColor = "#" + ((routeMeta && routeMeta.text_color) || "ffffff");
+      const mins = minutesUntil(e.expected);
+      const minsLabel = mins === null ? "—" : mins <= 0 ? "à l'arrêt" : `${mins} min`;
+
+      const li = document.createElement("li");
+      li.className = "board-row";
+      li.innerHTML =
+        `<span class="board-line" style="background:${color};color:${textColor}">${escapeHtml(e.lineid)}</span>` +
+        `<span class="board-dest">` +
+          `<span class="board-dest-name">${escapeHtml(e.destination || "—")}</span>` +
+          (e.note ? `<span class="board-note">${escapeHtml(e.note)}</span>` : "") +
+        `</span>` +
+        `<span class="board-eta">${escapeHtml(minsLabel)}</span>`;
+      list.appendChild(li);
+    }
+  }
+
+  async function fetchWaitingTimes() {
+    if (!REALTIME_PROXY_URL || !boardState.stopId || boardState.fetching) return;
+    const btn = document.getElementById("boardRefreshBtn");
+    const status = document.getElementById("boardStatus");
+    boardState.fetching = true;
+    if (btn) { btn.disabled = true; btn.textContent = "Récupération…"; }
+    if (status) status.textContent = "Appel de l'API en cours…";
+
+    try {
+      const params = new URLSearchParams({
+        dataset: "WaitingTimes",
+        where: `pointid="${boardState.stopId}"`,
+        limit: "50",
+      });
+      const res = await fetch(`${REALTIME_PROXY_URL}?${params.toString()}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`Réponse ${res.status}`);
+      const data = await res.json();
+      console.log("WaitingTimes brut pour", boardState.stopId, data);
+      const entries = parseWaitingTimes(data);
+      renderBoard(entries);
+      if (status) {
+        status.textContent = `Mis à jour à ${isoTimeInput(new Date())}` +
+          (entries.length === 0 ? " — voir la console si ça semble anormal." : "");
+      }
+    } catch (err) {
+      console.error(err);
+      if (status) status.textContent = "Échec de la récupération (voir la console).";
+    } finally {
+      boardState.fetching = false;
+      if (btn) { btn.disabled = false; btn.textContent = "Rafraîchir"; }
+    }
   }
 
 
@@ -497,20 +653,18 @@
       source: "stops",
       layout: { visibility: "none" },
       paint: {
-        "circle-radius": 2.5,
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2, 16, 4.5],
         "circle-color": "#9aa5b1",
-        "circle-opacity": 0.85,
+        "circle-opacity": 0.9,
         "circle-stroke-width": 0,
       },
-      minzoom: 13,
     });
     map.on("click", "stops-layer", (e) => {
       const f = e.features[0];
-      new maplibregl.Popup({ closeButton: false })
-        .setLngLat(f.geometry.coordinates)
-        .setHTML(`<div class="vehicle-popup-route">${f.properties.name}</div>`)
-        .addTo(map);
+      openBoard(f.properties.id, f.properties.name);
     });
+    map.on("mouseenter", "stops-layer", () => { map.getCanvas().style.cursor = "pointer"; });
+    map.on("mouseleave", "stops-layer", () => { map.getCanvas().style.cursor = ""; });
   }
 
   function addVehiclesLayer() {
@@ -750,6 +904,11 @@
       }
     }
     if (realtimeClearBtn) realtimeClearBtn.addEventListener("click", clearRealtime);
+
+    const boardRefreshBtn = document.getElementById("boardRefreshBtn");
+    const boardCloseBtn = document.getElementById("boardCloseBtn");
+    if (boardRefreshBtn) boardRefreshBtn.addEventListener("click", fetchWaitingTimes);
+    if (boardCloseBtn) boardCloseBtn.addEventListener("click", closeBoard);
 
     // Re-vérifie le statut "temps réel" périodiquement (ex: 1x mais date dérive)
     setInterval(setStatusMode, 1000);
