@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>STIB·MIVB — Trafic theorique</title>
+<meta name="description" content="Simulation  des trams, métros et bus de la STIB/MIVB à partir des données GTFS officielles." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+
+<link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet" />
+<script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+<div id="map" role="application" aria-label="Carte du réseau STIB/MIVB"></div>
+
+<button id="panelToggle" class="panel-toggle" aria-expanded="true" aria-controls="panel" title="Afficher/masquer le panneau">
+  <span class="panel-toggle-icon">▾</span>
+</button>
+
+<section id="panel" class="panel">
+  <header class="panel-head">
+    <p class="eyebrow">STIB · MIVB — Simulation</p>
+    <div class="clock-row">
+      <div class="clock" id="clock" aria-live="polite">--:--:--</div>
+      <div class="status-pill" id="statusPill" data-mode="live">
+        <span class="status-dot"></span>
+        <span id="statusLabel">TEMPS RÉEL</span>
+      </div>
+    </div>
+    <p class="date-line" id="dateLine">—</p>
+  </header>
+
+  <div class="panel-body">
+    <div class="field-row">
+      <label class="field">
+        <span class="field-label">Date</span>
+        <input type="date" id="dateInput" />
+      </label>
+      <label class="field">
+        <span class="field-label">Heure</span>
+        <input type="time" id="timeInput" step="1" />
+      </label>
+    </div>
+
+    <div class="field-row">
+      <label class="field">
+        <span class="field-label">Vitesse</span>
+        <select id="speedSelect">
+          <option value="1" selected>1×  (temps réel)</option>
+          <option value="2">2×</option>
+          <option value="5">5×</option>
+          <option value="10">10×</option>
+          <option value="30">30×</option>
+          <option value="60">60×</option>
+          <option value="300">300×</option>
+        </select>
+      </label>
+      <div class="field buttons-field">
+        <span class="field-label">&nbsp;</span>
+        <div class="btn-group">
+          <button id="playPauseBtn" class="btn btn-icon" title="Lecture / Pause">⏸</button>
+          <button id="nowBtn" class="btn" title="Revenir à l'instant présent">Maintenant</button>
+        </div>
+      </div>
+    </div>
+
+    <label class="checkbox-row">
+      <input type="checkbox" id="stopsToggle" />
+      <span>Afficher les arrêts</span>
+    </label>
+
+    <div class="legend">
+      <div class="legend-item"><span class="legend-dot legend-dot-metro"></span>Métro</div>
+      <div class="legend-item"><span class="legend-dot legend-dot-tram"></span>Tram</div>
+      <div class="legend-item"><span class="legend-dot legend-dot-bus"></span>Bus</div>
+      <div class="legend-count" id="vehicleCount">0 véhicule</div>
+    </div>
+  </div>
+
+  <footer class="panel-foot" id="dataFoot">Chargement des données GTFS…</footer>
+</section>
+
+<div id="loadingOverlay" class="loading-overlay">
+  <div class="loading-box">
+    <div class="loading-spinner" aria-hidden="true"></div>
+    <p>Chargement du réseau STIB/MIVB…</p>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>
