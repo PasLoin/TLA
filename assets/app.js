@@ -568,6 +568,12 @@
     }
   }
 
+  // Filtre serveur confirmé fonctionnel le 30/06/2026 (where=pointid="X").
+  // L'échec initial observé (filtered_count: 0, data_processed_count
+  // anormalement bas) était un faux négatif ponctuel — vraisemblablement le
+  // store temps réel pris en plein cycle de rafraîchissement interne — et
+  // non un problème de syntaxe ou un bug structurel. Un seul appel API par
+  // clic, filtré directement côté serveur sur l'arrêt exact.
   async function fetchWaitingTimes() {
     if (!REALTIME_PROXY_URL || !boardState.stopId || boardState.fetching) return;
     const btn = document.getElementById("boardRefreshBtn");
@@ -579,7 +585,7 @@
     try {
       const params = new URLSearchParams({
         dataset: "WaitingTimes",
-        pointid: boardState.stopId,
+        where: `pointid="${boardState.stopId}"`,
       });
       const res = await fetch(`${REALTIME_PROXY_URL}?${params.toString()}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Réponse ${res.status}`);
@@ -589,7 +595,7 @@
       renderBoard(entries);
       if (status) {
         status.textContent = `Mis à jour à ${isoTimeInput(new Date())}` +
-          (entries.length === 0 ? " — voir la console si ça semble anormal." : "");
+          (entries.length === 0 ? " — réessaie si ça semble anormal (voir README)." : "");
       }
     } catch (err) {
       console.error(err);
