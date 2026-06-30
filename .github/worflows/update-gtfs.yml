@@ -1,0 +1,50 @@
+name: Update GTFS data
+
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch: {} # 
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gtfs-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Fetch & process GTFS
+        id: gtfs
+        run: python scripts/fetch_and_process.py
+
+      - name: Commit & push if changed
+        if: steps.gtfs.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "Rien à committer (diff vide malgré changed=true)."
+          else
+            git commit -m "chore: update GTFS data ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
+            git push
+          fi
+
+      - name: No changes
+        if: steps.gtfs.outputs.changed != 'true'
+        run: echo "Flux GTFS inchangé, rien à publier aujourd'hui."
