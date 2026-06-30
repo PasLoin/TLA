@@ -44,7 +44,7 @@
   // URL de ton Worker Cloudflare (proxy sécurisé pour l'API temps réel).
   // Laisse à null pour désactiver le bouton "temps réel" tant qu'il n'est
   // pas configuré.
-  const REALTIME_PROXY_URL = null; // ex: "https://stib-realtime-proxy.TON-COMPTE.workers.dev"
+  const REALTIME_PROXY_URL = https://stib-realtime-proxy.pulpfiction4651694.workers.dev/; // 
 
   const ROUTE_TYPE_RADIUS = { 0: 6, 1: 7, 3: 5 }; // tram, métro, bus
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
