@@ -1,28 +1,14 @@
 /* ==========================================================================
-   STIB·MIVB — Simulation temps réel
-   --------------------------------------------------------------------------
-   Charge les fichiers data/*.json (générés par scripts/fetch_and_process.py)
-   et simule, pour une date/heure donnée, la position de chaque véhicule en
-   service en interpolant linéairement entre ses deux arrêts encadrants
-   (le long du tracé réel de la ligne quand il est disponible).
-
-   Format des données (voir scripts/fetch_and_process.py pour le détail) :
-     routes.json   : { route_id: {short_name, long_name, type, color, text_color} }
-     stops.json    : { stop_id: {name, lat, lon} }
-     shapes.json   : { shape_id: [[dist_km, lon, lat], ...] }   (trié par dist)
-     calendar.json : [ {service_id, days:[L,Ma,Me,J,V,S,D], start_date, end_date} ]
-     calendar_dates.json : [ {service_id, date:'YYYYMMDD', exception_type} ]
-     trips.json    : [ [trip_id, route_id, service_id, shape_id|null,
-                         direction_id, headsign, stops] ]
-       - avec tracé : stops = [[time_sec, dist_km], ...]
-       - sans tracé : stops = [[time_sec, lon, lat], ...]
-   ========================================================================== */
+ */
 
 (() => {
   "use strict";
 
   const DATA_BASE = "data/";
   const UPDATE_INTERVAL_MS = 1000; // fréquence de recalcul des positions
+
+
+  const REALTIME_PROXY_URL = stib-realtime-proxy.pulpfiction4651694.workers.dev; //
 
   const ROUTE_TYPE_RADIUS = { 0: 6, 1: 7, 3: 5 }; // tram, métro, bus
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
@@ -46,6 +32,8 @@
   let exceptionsByDate = new Map(); // 'YYYYMMDD' -> {added:Set, removed:Set}
   let tripsData = [];
   let tripsByService = new Map(); // service_id -> [trip, ...]   (perf: éviter de scanner tous les trips)
+  let stopShapeIndex = {};        // route_short_name -> { stop_id: [shape_id, dist_km] }
+  let routesByShortName = new Map(); // short_name -> {route_id, ...routeData}
 
   // ------------------------------------------------------------------------
   // Utilitaires date / heure
@@ -90,7 +78,7 @@
   }
 
   async function loadAll() {
-    const [meta, routes, stops, shapes, calendar, calendarDates, trips] = await Promise.all([
+    const [meta, routes, stops, shapes, calendar, calendarDates, trips, stopShapeIdx] = await Promise.all([
       fetchJSON("meta.json"),
       fetchJSON("routes.json"),
       fetchJSON("stops.json"),
@@ -98,6 +86,7 @@
       fetchJSON("calendar.json"),
       fetchJSON("calendar_dates.json"),
       fetchJSON("trips.json"),
+      fetchJSON("stop_shape_index.json"),
     ]);
 
     routesData = routes;
@@ -105,6 +94,14 @@
     shapesData = shapes;
     calendarData = calendar;
     tripsData = trips;
+    stopShapeIndex = stopShapeIdx;
+
+    routesByShortName = new Map();
+    for (const [routeId, r] of Object.entries(routesData)) {
+      if (r.short_name && !routesByShortName.has(r.short_name)) {
+        routesByShortName.set(r.short_name, { route_id: routeId, ...r });
+      }
+    }
 
     exceptionsByDate = new Map();
     for (const ex of calendarDates) {
@@ -294,8 +291,126 @@
   }
 
   // ------------------------------------------------------------------------
-  // Carte MapLibre
+  // Mode "temps réel" (manuel) — voir le commentaire d'en-tête du fichier.
   // ------------------------------------------------------------------------
+
+  const realtimeState = {
+    fetching: false,
+    lastFetchAt: null,
+    count: 0,
+  };
+
+  function resolveLineKey(lineid) {
+    if (stopShapeIndex[lineid]) return lineid;
+    if (lineid.startsWith("T") && stopShapeIndex[lineid.slice(1)]) return lineid.slice(1);
+    return null;
+  }
+
+  function resolveRouteMeta(lineid) {
+    if (routesByShortName.has(lineid)) return routesByShortName.get(lineid);
+    if (lineid.startsWith("T") && routesByShortName.has(lineid.slice(1))) {
+      return routesByShortName.get(lineid.slice(1));
+    }
+    return null;
+  }
+
+  // À partir d'une entrée brute { directionId, pointId, distanceFromPoint }
+  // de l'API VehiclePositions, calcule une position [lon, lat] approximative.
+  // Retourne null si on ne peut pas la situer du tout (arrêt inconnu).
+  function placeRealtimeVehicle(lineid, pointId, distanceFromPoint) {
+    const lineKey = resolveLineKey(lineid);
+    if (lineKey) {
+      const entry = stopShapeIndex[lineKey][pointId];
+      if (entry) {
+        const [shapeId, distKm] = entry;
+        const shape = shapesData[shapeId];
+        if (shape) {
+          const target = distKm + (distanceFromPoint || 0) / 1000;
+          const [lon, lat] = positionOnShape(shape, target);
+          return [lon, lat];
+        }
+      }
+    }
+    // Repli : position brute de l'arrêt référencé (sans tenir compte de
+    // distanceFromPoint), si on la connaît.
+    const stop = stopsData[pointId];
+    if (stop) return [stop.lon, stop.lat];
+    return null;
+  }
+
+  function realtimeFeaturesFromResults(results) {
+    const features = [];
+    for (const entry of results) {
+      const lineid = entry.lineid;
+      let positions;
+      try {
+        // Le champ est une chaîne JSON imbriquée dans le JSON de réponse.
+        positions = JSON.parse(entry.vehiclepositions);
+      } catch (e) {
+        continue;
+      }
+      const routeMeta = resolveRouteMeta(lineid);
+      for (const vp of positions) {
+        const coords = placeRealtimeVehicle(lineid, vp.pointId, vp.distanceFromPoint);
+        if (!coords) continue;
+        features.push({
+          type: "Feature",
+          properties: {
+            lineid,
+            pointId: vp.pointId,
+            directionId: vp.directionId,
+            distanceFromPoint: vp.distanceFromPoint,
+            color: "#" + ((routeMeta && routeMeta.color) || "1d4ed8"),
+          },
+          geometry: { type: "Point", coordinates: coords },
+        });
+      }
+    }
+    return features;
+  }
+
+  async function fetchRealtime() {
+    if (!REALTIME_PROXY_URL || realtimeState.fetching) return;
+    const btn = document.getElementById("realtimeBtn");
+    const status = document.getElementById("realtimeStatus");
+    realtimeState.fetching = true;
+    if (btn) { btn.disabled = true; btn.textContent = "Récupération…"; }
+    if (status) status.textContent = "Appel de l'API en cours…";
+
+    try {
+      const res = await fetch(REALTIME_PROXY_URL, { cache: "no-store" });
+      if (!res.ok) throw new Error(`Réponse ${res.status}`);
+      const data = await res.json();
+      const features = realtimeFeaturesFromResults(data.results || []);
+      if (map.getSource("vehicles-realtime")) {
+        map.getSource("vehicles-realtime").setData({ type: "FeatureCollection", features });
+      }
+      realtimeState.lastFetchAt = new Date();
+      realtimeState.count = features.length;
+      if (status) {
+        status.textContent =
+          `${features.length} véhicule(s) — capturé à ${isoTimeInput(realtimeState.lastFetchAt)}`;
+      }
+    } catch (err) {
+      console.error(err);
+      if (status) status.textContent = "Échec de la récupération (voir la console).";
+    } finally {
+      realtimeState.fetching = false;
+      if (btn) { btn.disabled = false; btn.textContent = "Récupérer le temps réel"; }
+    }
+  }
+
+  function clearRealtime() {
+    if (map.getSource("vehicles-realtime")) {
+      map.getSource("vehicles-realtime").setData({ type: "FeatureCollection", features: [] });
+    }
+    realtimeState.lastFetchAt = null;
+    realtimeState.count = 0;
+    const status = document.getElementById("realtimeStatus");
+    if (status) status.textContent = "Aucune donnée temps réel chargée.";
+  }
+
+
 
   let map;
   let vehiclesLoaded = false;
@@ -327,6 +442,7 @@
     map.on("load", () => {
       addStopsLayer();
       addVehiclesLayer();
+      addRealtimeLayer();
       vehiclesLoaded = true;
       document.getElementById("loadingOverlay").classList.add("hidden");
     });
@@ -410,6 +526,43 @@
     });
     map.on("mouseenter", "vehicles-circle", () => { map.getCanvas().style.cursor = "pointer"; });
     map.on("mouseleave", "vehicles-circle", () => { map.getCanvas().style.cursor = ""; });
+  }
+
+  function addRealtimeLayer() {
+    map.addSource("vehicles-realtime", {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+
+    // Style délibérément différent des véhicules simulés (anneau creux blanc
+    // au lieu d'un disque plein) pour qu'on distingue au premier coup d'œil
+    // un instantané "temps réel" d'une position simulée.
+    map.addLayer({
+      id: "vehicles-realtime-circle",
+      type: "circle",
+      source: "vehicles-realtime",
+      paint: {
+        "circle-radius": 8,
+        "circle-color": "#ffffff",
+        "circle-opacity": 0.15,
+        "circle-stroke-color": ["get", "color"],
+        "circle-stroke-width": 2.5,
+      },
+    });
+
+    map.on("click", "vehicles-realtime-circle", (e) => {
+      const f = e.features[0];
+      const p = f.properties;
+      new maplibregl.Popup({ closeButton: false })
+        .setLngLat(f.geometry.coordinates)
+        .setHTML(
+          `<div class="vehicle-popup-route">Ligne ${escapeHtml(p.lineid)} — temps réel</div>` +
+          `<div class="vehicle-popup-headsign">+${escapeHtml(p.distanceFromPoint)} m après l'arrêt ${escapeHtml(p.pointId)}</div>`
+        )
+        .addTo(map);
+    });
+    map.on("mouseenter", "vehicles-realtime-circle", () => { map.getCanvas().style.cursor = "pointer"; });
+    map.on("mouseleave", "vehicles-realtime-circle", () => { map.getCanvas().style.cursor = ""; });
   }
 
   function escapeHtml(s) {
@@ -546,6 +699,21 @@
     panelToggle.addEventListener("click", () => {
       document.body.classList.toggle("panel-collapsed");
     });
+
+    const realtimeBtn = document.getElementById("realtimeBtn");
+    const realtimeClearBtn = document.getElementById("realtimeClearBtn");
+    const realtimeStatus = document.getElementById("realtimeStatus");
+    if (realtimeBtn) {
+      if (!REALTIME_PROXY_URL) {
+        realtimeBtn.disabled = true;
+        if (realtimeStatus) {
+          realtimeStatus.textContent = "Non configuré (renseigne REALTIME_PROXY_URL dans app.js).";
+        }
+      } else {
+        realtimeBtn.addEventListener("click", fetchRealtime);
+      }
+    }
+    if (realtimeClearBtn) realtimeClearBtn.addEventListener("click", clearRealtime);
 
     // Re-vérifie le statut "temps réel" périodiquement (ex: 1x mais date dérive)
     setInterval(setStatusMode, 1000);
