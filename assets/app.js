@@ -43,7 +43,6 @@
 
 
   const REALTIME_PROXY_URL = "https://stib-realtime-proxy.pulpfiction4651694.workers.dev" // ;
-
   const ROUTE_TYPE_RADIUS = { 0: 6, 1: 7, 3: 5 }; // tram, métro, bus
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
 
@@ -632,14 +631,6 @@
       }),
       "bottom-right"
     );
-
-    map.on("load", () => {
-      addStopsLayer();
-      addVehiclesLayer();
-      addRealtimeLayer();
-      vehiclesLoaded = true;
-      document.getElementById("loadingOverlay").classList.add("hidden");
-    });
   }
 
   function addStopsLayer() {
@@ -924,6 +915,16 @@
   async function main() {
     initMap();
     wireUI();
+
+    // On attend la fin des DEUX chargements (style/tuiles MapLibre d'un
+    // côté, fetch des data/*.json de l'autre) avant de construire les
+    // couches qui dépendent de stopsData/routesData. Sans ça, le "load" de
+    // la carte arrive souvent plus vite que les fetchs et la couche des
+    // arrêts se retrouvait créée avec un stopsData encore vide — figée à
+    // 0 feature pour toujours (contrairement aux véhicules, qui se
+    // redessinent chaque seconde et s'auto-réparent).
+    const mapReady = new Promise((resolve) => map.once("load", resolve));
+
     try {
       await loadAll();
     } catch (err) {
@@ -931,6 +932,14 @@
       document.getElementById("dataFoot").textContent =
         "Erreur de chargement des données GTFS. Réessayez plus tard.";
     }
+    await mapReady;
+
+    addStopsLayer();
+    addVehiclesLayer();
+    addRealtimeLayer();
+    vehiclesLoaded = true;
+    document.getElementById("loadingOverlay").classList.add("hidden");
+
     buildCandidatesForDate(state.simTime);
     setStatusMode();
     requestAnimationFrame(frame);
