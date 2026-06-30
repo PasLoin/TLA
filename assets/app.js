@@ -1,5 +1,39 @@
 /* ==========================================================================
- */
+   STIB·MIVB — Simulation temps réel
+   --------------------------------------------------------------------------
+   Charge les fichiers data/*.json (générés par scripts/fetch_and_process.py)
+   et simule, pour une date/heure donnée, la position de chaque véhicule en
+   service en interpolant linéairement entre ses deux arrêts encadrants
+   (le long du tracé réel de la ligne quand il est disponible).
+
+   Format des données (voir scripts/fetch_and_process.py pour le détail) :
+     routes.json   : { route_id: {short_name, long_name, type, color, text_color} }
+     stops.json    : { stop_id: {name, lat, lon} }
+     shapes.json   : { shape_id: [[dist_km, lon, lat], ...] }   (trié par dist)
+     calendar.json : [ {service_id, days:[L,Ma,Me,J,V,S,D], start_date, end_date} ]
+     calendar_dates.json : [ {service_id, date:'YYYYMMDD', exception_type} ]
+     trips.json    : [ [trip_id, route_id, service_id, shape_id|null,
+                         direction_id, headsign, stops] ]
+       - avec tracé : stops = [[time_sec, dist_km], ...]
+       - sans tracé : stops = [[time_sec, lon, lat], ...]
+     stop_shape_index.json : { route_short_name: { stop_id: [shape_id, dist_km] } }
+       (sert uniquement au mode "temps réel manuel" ci-dessous)
+
+   --------------------------------------------------------------------------
+   Mode "temps réel" (manuel)
+   --------------------------------------------------------------------------
+   Sur clic du bouton "Récupérer le temps réel", l'app appelle un proxy
+   Cloudflare Worker (qui détient la clé API STIB côté serveur) renvoyant les
+   données brutes de l'API VehiclePositions de la STIB. Ce format ne fournit
+   ni coordonnées GPS ni identité de véhicule, seulement, par ligne, une liste
+   de { directionId, pointId, distanceFromPoint } : un véhicule se trouve à
+   distanceFromPoint mètres après l'arrêt pointId. On reprojette donc cette
+   position sur le tracé de la ligne via stop_shape_index.json (qui indique,
+   pour cet arrêt précis sur cette ligne, à quelle distance cumulée du tracé
+   il correspond), en ajoutant distanceFromPoint. C'est un instantané figé
+   (pas d'animation), affiché avec un style visuel distinct des véhicules
+   simulés, jusqu'au prochain clic.
+   ========================================================================== */
 
 (() => {
   "use strict";
@@ -7,8 +41,10 @@
   const DATA_BASE = "data/";
   const UPDATE_INTERVAL_MS = 1000; // fréquence de recalcul des positions
 
-
-  const REALTIME_PROXY_URL = stib-realtime-proxy.pulpfiction4651694.workers.dev; //
+  // URL de ton Worker Cloudflare (proxy sécurisé pour l'API temps réel).
+  // Laisse à null pour désactiver le bouton "temps réel" tant qu'il n'est
+  // pas configuré.
+  const REALTIME_PROXY_URL = null; // ex: "https://stib-realtime-proxy.TON-COMPTE.workers.dev"
 
   const ROUTE_TYPE_RADIUS = { 0: 6, 1: 7, 3: 5 }; // tram, métro, bus
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
