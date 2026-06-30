@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>STIB·MIVB — Trafic theorique</title>
-<meta name="description" content="Simulation  des trams, métros et bus de la STIB/MIVB à partir des données GTFS officielles." />
+<title>STIB·MIVB — Trafic en temps réel</title>
+<meta name="description" content="Simulation en temps réel des trams, métros et bus de la STIB/MIVB à partir des données GTFS officielles." />
 
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -80,6 +80,16 @@
       <div class="legend-item"><span class="legend-dot legend-dot-tram"></span>Tram</div>
       <div class="legend-item"><span class="legend-dot legend-dot-bus"></span>Bus</div>
       <div class="legend-count" id="vehicleCount">0 véhicule</div>
+    </div>
+
+    <div class="realtime-block">
+      <p class="field-label">Position officielle (API STIB)</p>
+      <p class="realtime-hint">Instantané ponctuel — pas d'animation, à rafraîchir manuellement.</p>
+      <div class="btn-group">
+        <button id="realtimeBtn" class="btn">Récupérer le temps réel</button>
+        <button id="realtimeClearBtn" class="btn btn-icon" title="Effacer l'instantané">✕</button>
+      </div>
+      <p class="realtime-status" id="realtimeStatus">Aucune donnée temps réel chargée.</p>
     </div>
   </div>
 
