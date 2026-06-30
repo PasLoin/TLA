@@ -18,8 +18,11 @@ Sortie (dans data/) :
   trips.json            [ [trip_id, route_id, service_id, shape_id|null,
                             direction_id, headsign, stops] ]
                          où stops est:
-                           - si shape_id présent : [[time_sec, dist_km], ...]
-                           - si shape_id absent   : [[time_sec, lon, lat], ...]
+                           - si shape_id présent : [[arr_sec, dep_sec, dist_km], ...]
+                           - si shape_id absent   : [[arr_sec, dep_sec, lon, lat], ...]
+                         (arr_sec/dep_sec = arrival_time/departure_time GTFS en
+                         secondes ; dep_sec >= arr_sec, leur écart est le temps
+                         d'arrêt réel du véhicule à la station)
 
 Convention GTFS pour les horaires après minuit : les valeurs peuvent dépasser
 24:00:00 (ex: 25:10:00 = 01:10:00 le lendemain du jour de service). Ces
@@ -284,17 +287,26 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
         }
 
     # ---- stop_times (regroupés par trip) ----
+    # On conserve désormais arrival_time ET departure_time séparément (et non
+    # plus une seule valeur fusionnée) afin que le client puisse reproduire le
+    # temps d'arrêt (dwell time) réel à chaque station plutôt que de faire
+    # glisser le véhicule en continu d'un arrêt à l'autre.
     log("Traitement stop_times.txt (peut prendre un moment)")
-    stop_times_by_trip: Dict[str, List[Tuple[int, int, str]]] = {}
+    stop_times_by_trip: Dict[str, List[Tuple[int, int, int, str]]] = {}
     for row in read_rows(zf, "stop_times.txt"):
         trip_id = row["trip_id"]
         seq = int(row["stop_sequence"])
-        t = time_to_seconds(row.get("departure_time") or row.get("arrival_time"))
-        if t is None:
-            t = time_to_seconds(row.get("arrival_time"))
-        if t is None:
+        arr_t = time_to_seconds(row.get("arrival_time"))
+        dep_t = time_to_seconds(row.get("departure_time"))
+        if arr_t is None:
+            arr_t = dep_t
+        if dep_t is None:
+            dep_t = arr_t
+        if arr_t is None:
             continue
-        stop_times_by_trip.setdefault(trip_id, []).append((seq, t, row["stop_id"]))
+        if dep_t < arr_t:
+            dep_t = arr_t  # garde-fou : un flux mal formé ne doit pas inverser l'ordre
+        stop_times_by_trip.setdefault(trip_id, []).append((seq, arr_t, dep_t, row["stop_id"]))
 
     # ---- projection des arrêts sur les tracés (avec cache + recherche
     #      "vers l'avant" pour rester monotone même sur des lignes en boucle) ----
@@ -351,7 +363,7 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
         if has_shape:
             last_idx = 0
             ok = True
-            for _, t, stop_id in stop_seq_list:
+            for _, arr_t, dep_t, stop_id in stop_seq_list:
                 st = stops.get(stop_id)
                 if st is None:
                     ok = False
@@ -363,7 +375,7 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
                     dist, idx = project_stop(shape_id, last_idx, st["lat"], st["lon"])
                     nearest_cache[cache_key] = dist
                     last_idx = idx
-                out_stops.append([t, round(dist, 4)])
+                out_stops.append([arr_t, dep_t, round(dist, 4)])
                 index_stop_shape(meta["route_id"], stop_id, shape_id, dist)
             if ok and out_stops:
                 trips_out.append([
@@ -376,11 +388,11 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
             out_stops = []
 
         # mode "sans tracé" : ligne droite entre arrêts successifs
-        for _, t, stop_id in stop_seq_list:
+        for _, arr_t, dep_t, stop_id in stop_seq_list:
             st = stops.get(stop_id)
             if st is None:
                 continue
-            out_stops.append([t, st["lon"], st["lat"]])
+            out_stops.append([arr_t, dep_t, st["lon"], st["lat"]])
         if len(out_stops) >= 2:
             trips_out.append([
                 trip_id, meta["route_id"], meta["service_id"], None,
