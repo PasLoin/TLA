@@ -319,6 +319,25 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
     n_fallback = 0
     n_skipped = 0
 
+    # Index { route_short_name: { stop_id: [shape_id, dist_km] } }, construit
+    # à partir des projections déjà calculées ci-dessous. Sert à repositionner
+    # les données de l'API temps réel VehiclePositions, qui ne fournissent ni
+    # lat/lon ni identité de véhicule : juste (lineId, pointId, distanceFromPoint).
+    # pointId correspond exactement à un stop_id GTFS ; en réutilisant le même
+    # stop_id que celui vu ici, on récupère le tracé (shape) orienté dans le
+    # bon sens (un stop_id donné n'est en pratique servi que dans une seule
+    # direction chez la STIB), et on ajoute distanceFromPoint à la distance du
+    # stop pour estimer la position courante du véhicule sur ce tracé.
+    stop_shape_index: Dict[Tuple[str, str], list] = {}
+
+    def index_stop_shape(route_id: str, stop_id: str, shape_id: str, dist: float) -> None:
+        short = routes.get(route_id, {}).get("short_name")
+        if not short:
+            return
+        key = (short, stop_id)
+        if key not in stop_shape_index:
+            stop_shape_index[key] = [shape_id, round(dist, 4)]
+
     for trip_id, stop_seq_list in stop_times_by_trip.items():
         meta = trips_meta.get(trip_id)
         if meta is None:
@@ -345,6 +364,7 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
                     nearest_cache[cache_key] = dist
                     last_idx = idx
                 out_stops.append([t, round(dist, 4)])
+                index_stop_shape(meta["route_id"], stop_id, shape_id, dist)
             if ok and out_stops:
                 trips_out.append([
                     trip_id, meta["route_id"], meta["service_id"], shape_id,
@@ -384,6 +404,11 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
             for i in keep_idx
         ]
 
+    # ---- index stop -> (shape, distance) par ligne, pour les données temps réel ----
+    stop_shape_index_out: Dict[str, Dict[str, list]] = {}
+    for (short, stop_id), val in stop_shape_index.items():
+        stop_shape_index_out.setdefault(short, {})[stop_id] = val
+
     # ---- méta ----
     meta = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -401,6 +426,7 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
             "trips": len(trips_out),
             "calendar": len(calendar),
             "calendar_dates": len(calendar_dates),
+            "stop_shape_index_lines": len(stop_shape_index_out),
         },
     }
 
@@ -412,6 +438,7 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
         "calendar": calendar,
         "calendar_dates": calendar_dates,
         "trips": trips_out,
+        "stop_shape_index": stop_shape_index_out,
     }
 
 
@@ -433,6 +460,7 @@ def write_outputs(result: Dict) -> None:
     dump("calendar.json", result["calendar"])
     dump("calendar_dates.json", result["calendar_dates"])
     dump("trips.json", result["trips"])
+    dump("stop_shape_index.json", result["stop_shape_index"])
 
 
 def set_github_output(key: str, value: str) -> None:
