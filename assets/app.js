@@ -616,6 +616,8 @@
       attributionControl: false,
       maxPitch: 0,
     });
+    // Accès debug uniquement (inspection depuis la console : window.__stibMap)
+    window.__stibMap = map;
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(
@@ -653,10 +655,11 @@
       source: "stops",
       layout: { visibility: "none" },
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2, 16, 4.5],
-        "circle-color": "#9aa5b1",
-        "circle-opacity": 0.9,
-        "circle-stroke-width": 0,
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2.5, 16, 5.5],
+        "circle-color": "#475569",
+        "circle-opacity": 0.95,
+        "circle-stroke-width": 1.2,
+        "circle-stroke-color": "#ffffff",
       },
     });
     map.on("click", "stops-layer", (e) => {
