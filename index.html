@@ -103,6 +103,21 @@
   </div>
 </div>
 
+<section id="departureBoard" class="board hidden">
+  <header class="board-head">
+    <div>
+      <p class="board-eyebrow">Prochains passages</p>
+      <h3 id="boardStopName">—</h3>
+    </div>
+    <button id="boardCloseBtn" class="btn btn-icon" title="Fermer">✕</button>
+  </header>
+  <div class="board-body">
+    <button id="boardRefreshBtn" class="btn">Rafraîchir</button>
+    <p class="board-status" id="boardStatus"></p>
+    <ul class="board-list" id="boardList"></ul>
+  </div>
+</section>
+
 <script src="assets/app.js"></script>
 </body>
 </html>
