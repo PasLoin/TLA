@@ -16,13 +16,19 @@ Sortie (dans data/) :
   calendar.json         [ {service_id, days:[L,Ma,Me,J,V,S,D], start_date, end_date} ]
   calendar_dates.json   [ {service_id, date, exception_type} ]
   trips.json            [ [trip_id, route_id, service_id, shape_id|null,
-                            direction_id, headsign, stops] ]
+                            direction_id, headsign, stops, stopseq_idx] ]
                          où stops est:
                            - si shape_id présent : [[arr_sec, dep_sec, dist_km], ...]
                            - si shape_id absent   : [[arr_sec, dep_sec, lon, lat], ...]
                          (arr_sec/dep_sec = arrival_time/departure_time GTFS en
                          secondes ; dep_sec >= arr_sec, leur écart est le temps
                          d'arrêt réel du véhicule à la station)
+                         stopseq_idx = index dans stop_sequences.json donnant la
+                         liste des stop_id desservis (alignée 1:1 avec stops).
+  stop_sequences.json   [ [stop_id, ...], ... ]  séquences d'arrêts dédupliquées
+                         (beaucoup de trajets partagent la même séquence, on ne
+                         la stocke qu'une fois ; sert au planificateur
+                         d'itinéraire côté client)
 
 Convention GTFS pour les horaires après minuit : les valeurs peuvent dépasser
 24:00:00 (ex: 25:10:00 = 01:10:00 le lendemain du jour de service). Ces
@@ -331,6 +337,22 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
     n_fallback = 0
     n_skipped = 0
 
+    # Séquences d'arrêts dédupliquées (pour le planificateur d'itinéraire).
+    # La plupart des trajets d'une même ligne/direction partagent exactement
+    # la même séquence : on ne la stocke qu'une fois et chaque trajet ne
+    # référence qu'un index, ce qui évite de faire exploser trips.json.
+    stop_sequences: List[List[str]] = []
+    stop_seq_index: Dict[str, int] = {}
+
+    def seq_idx_for(seq_ids: List[str]) -> int:
+        key = ",".join(seq_ids)
+        idx = stop_seq_index.get(key)
+        if idx is None:
+            idx = len(stop_sequences)
+            stop_sequences.append(seq_ids)
+            stop_seq_index[key] = idx
+        return idx
+
     # Index { route_short_name: { stop_id: [shape_id, dist_km] } }, construit
     # à partir des projections déjà calculées ci-dessous. Sert à repositionner
     # les données de l'API temps réel VehiclePositions, qui ne fournissent ni
@@ -360,6 +382,7 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
         has_shape = shape_id is not None and shape_id in shape_arrays and len(shape_arrays[shape_id]["lat"]) >= 2
 
         out_stops = []
+        seq_ids: List[str] = []
         if has_shape:
             last_idx = 0
             ok = True
@@ -376,16 +399,19 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
                     nearest_cache[cache_key] = dist
                     last_idx = idx
                 out_stops.append([arr_t, dep_t, round(dist, 4)])
+                seq_ids.append(stop_id)
                 index_stop_shape(meta["route_id"], stop_id, shape_id, dist)
             if ok and out_stops:
                 trips_out.append([
                     trip_id, meta["route_id"], meta["service_id"], shape_id,
                     meta["direction_id"], meta["headsign"], out_stops,
+                    seq_idx_for(seq_ids),
                 ])
                 n_with_shape += 1
                 continue
             # si la projection échoue, on retombe sur le mode sans tracé
             out_stops = []
+            seq_ids = []
 
         # mode "sans tracé" : ligne droite entre arrêts successifs
         for _, arr_t, dep_t, stop_id in stop_seq_list:
@@ -393,10 +419,12 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
             if st is None:
                 continue
             out_stops.append([arr_t, dep_t, st["lon"], st["lat"]])
+            seq_ids.append(stop_id)
         if len(out_stops) >= 2:
             trips_out.append([
                 trip_id, meta["route_id"], meta["service_id"], None,
                 meta["direction_id"], meta["headsign"], out_stops,
+                seq_idx_for(seq_ids),
             ])
             n_fallback += 1
         else:
@@ -439,6 +467,7 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
             "calendar": len(calendar),
             "calendar_dates": len(calendar_dates),
             "stop_shape_index_lines": len(stop_shape_index_out),
+            "stop_sequences": len(stop_sequences),
         },
     }
 
@@ -451,6 +480,7 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
         "calendar_dates": calendar_dates,
         "trips": trips_out,
         "stop_shape_index": stop_shape_index_out,
+        "stop_sequences": stop_sequences,
     }
 
 
@@ -473,6 +503,7 @@ def write_outputs(result: Dict) -> None:
     dump("calendar_dates.json", result["calendar_dates"])
     dump("trips.json", result["trips"])
     dump("stop_shape_index.json", result["stop_shape_index"])
+    dump("stop_sequences.json", result["stop_sequences"])
 
 
 def set_github_output(key: str, value: str) -> None:
