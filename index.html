@@ -75,6 +75,23 @@
       <span>Afficher les arrêts</span>
     </label>
 
+    <label class="checkbox-row">
+      <input type="checkbox" id="stopsNamesToggle" />
+      <span>Afficher les noms des arrêts</span>
+    </label>
+
+    <div class="planner-block">
+      <p class="field-label">Planificateur d'itinéraire</p>
+      <div class="btn-group">
+        <button id="plannerOriginBtn" class="btn">📍 Départ</button>
+        <button id="plannerDestBtn" class="btn">🏁 Arrivée</button>
+        <button id="plannerClearBtn" class="btn btn-icon" title="Effacer l'itinéraire">✕</button>
+      </div>
+      <p class="planner-hint" id="plannerHint">Choisis un départ et une arrivée sur la carte. La recherche part à la date/heure de la simulation ci-dessus.</p>
+      <button id="plannerSearchBtn" class="btn planner-search" disabled>Rechercher un itinéraire</button>
+      <div id="plannerResults" class="planner-results"></div>
+    </div>
+
     <div class="legend">
       <div class="legend-item"><span class="legend-dot legend-dot-metro"></span>Métro</div>
       <div class="legend-item"><span class="legend-dot legend-dot-tram"></span>Tram</div>
