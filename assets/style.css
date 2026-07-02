@@ -304,6 +304,100 @@ select { font-family: var(--font-body); cursor: pointer; }
   cursor: not-allowed;
 }
 
+/* ---------------- Planificateur d'itinéraire ---------------- */
+
+.planner-block {
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.planner-block .btn-group { width: 100%; }
+.planner-block .btn-group .btn:not(.btn-icon) { flex: 1; }
+.planner-hint {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.planner-search:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-active {
+  background: var(--accent-dim) !important;
+  border-color: var(--accent) !important;
+  color: #fff;
+}
+
+.planner-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 34vh;
+  overflow-y: auto;
+}
+.planner-empty {
+  margin: 0;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+.journey {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--ink-2);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.journey:hover { border-color: #3a4456; }
+.journey-selected { border-color: var(--accent); }
+.journey-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.journey-times {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.journey-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.journey-legs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.leg {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.leg b { color: var(--text); font-weight: 600; }
+.leg-walk { font-size: 10.5px; }
+.leg-line {
+  flex: 0 0 auto;
+  min-width: 26px;
+  text-align: center;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+}
+.leg-detail { flex: 1; }
+.leg-nstops { color: var(--text-faint); }
+
 /* ---------------- Panel toggle (mobile) ---------------- */
 
 .panel-toggle {
