@@ -15,11 +15,26 @@
      calendar.json : [ {service_id, days:[L,Ma,Me,J,V,S,D], start_date, end_date} ]
      calendar_dates.json : [ {service_id, date:'YYYYMMDD', exception_type} ]
      trips.json    : [ [trip_id, route_id, service_id, shape_id|null,
-                         direction_id, headsign, stops] ]
+                         direction_id, headsign, stops, stopseq_idx] ]
        - avec tracé : stops = [[arr_sec, dep_sec, dist_km], ...]
        - sans tracé : stops = [[arr_sec, dep_sec, lon, lat], ...]
+       - stopseq_idx : index dans stop_sequences.json (liste des stop_id
+         desservis, alignée 1:1 avec stops) — utilisé par le planificateur
+     stop_sequences.json : [ [stop_id, ...], ... ] séquences d'arrêts dédupliquées
      stop_shape_index.json : { route_short_name: { stop_id: [shape_id, dist_km] } }
        (sert uniquement au mode "temps réel manuel" ci-dessous)
+
+   --------------------------------------------------------------------------
+   Planificateur d'itinéraire (RAPTOR)
+   --------------------------------------------------------------------------
+   Choix d'un point de départ et d'arrivée par clic sur la carte. On cherche
+   les arrêts accessibles à pied autour de chaque point, puis on exécute
+   l'algorithme RAPTOR (Round-bAsed Public Transit Optimized Router) sur les
+   horaires du jour simulé : chaque "round" k explore les trajets atteignables
+   avec au plus k-1 correspondances, en relaxant ensuite les transferts à pied
+   entre arrêts proches. On présente les alternatives Pareto-optimales
+   (arrivée la plus tôt pour chaque nombre de correspondances). L'heure de
+   départ est la date/heure de la simulation.
 
    --------------------------------------------------------------------------
    Mode "temps réel" (manuel)
@@ -69,6 +84,7 @@
   let tripsByService = new Map(); // service_id -> [trip, ...]   (perf: éviter de scanner tous les trips)
   let stopShapeIndex = {};        // route_short_name -> { stop_id: [shape_id, dist_km] }
   let routesByShortName = new Map(); // short_name -> {route_id, ...routeData}
+  let stopSequencesData = null;   // [[stop_id, ...], ...] — null si données non régénérées
 
   // ------------------------------------------------------------------------
   // Utilitaires date / heure
@@ -123,6 +139,14 @@
       fetchJSON("trips.json"),
       fetchJSON("stop_shape_index.json"),
     ]);
+
+    // Optionnel (planificateur) : absent si les données n'ont pas encore été
+    // régénérées avec la version du script qui l'exporte.
+    try {
+      stopSequencesData = await fetchJSON("stop_sequences.json");
+    } catch (e) {
+      stopSequencesData = null;
+    }
 
     routesData = routes;
     stopsData = stops;
@@ -351,6 +375,587 @@
       });
     }
     return features;
+  }
+
+  // ------------------------------------------------------------------------
+  // Planificateur d'itinéraire (RAPTOR) — voir le commentaire d'en-tête.
+  // ------------------------------------------------------------------------
+
+  const WALK_SPEED_MPS = 1.25;        // ~4,5 km/h
+  const MAX_WALK_ORIGIN_M = 700;      // rayon de recherche des arrêts de départ/arrivée
+  const MAX_WALK_ORIGIN_FALLBACK_M = 1500; // rayon élargi si rien dans le premier
+  const MAX_ORIGIN_STOPS = 6;         // nb max d'arrêts candidats de chaque côté
+  const TRANSFER_RADIUS_M = 250;      // distance max d'une correspondance à pied
+  const TRANSFER_WALK_PENALTY_S = 30; // marge fixe ajoutée à chaque transfert à pied
+  const TRANSFER_BUFFER_S = 60;       // marge min pour attraper un véhicule après un autre
+  const MAX_ROUNDS = 4;               // jusqu'à 3 correspondances
+
+  const plannerState = {
+    picking: null,       // 'origin' | 'dest' | null
+    origin: null,        // {lon, lat}
+    dest: null,
+    originMarker: null,
+    destMarker: null,
+    // Structures RAPTOR, reconstruites quand la date change :
+    timetableDateKey: null,
+    patterns: [],        // [{routeId, stopIds, trips:[{stops, offset, headsign, shapeId}]}]
+    routesAtStop: null,  // Map stop_id -> [[patternIdx, posInPattern], ...]
+    footpaths: null,     // Map stop_id -> [[stop_id, walkSec], ...]
+    stopGrid: null,      // index spatial des arrêts
+    journeys: [],
+  };
+
+  function metersBetween(lat1, lon1, lat2, lon2) {
+    const dlat = lat2 - lat1;
+    const dlon = (lon2 - lon1) * Math.cos(((lat1 + lat2) / 2) * Math.PI / 180);
+    return Math.hypot(dlat, dlon) * 111320;
+  }
+
+  // ---- Index spatial des arrêts (grille) --------------------------------
+
+  const GRID_CELL_DEG = 0.004; // ~440 m N-S
+
+  function buildStopGrid() {
+    const grid = new Map();
+    for (const [id, s] of Object.entries(stopsData)) {
+      const key = `${Math.floor(s.lat / GRID_CELL_DEG)}:${Math.floor(s.lon / GRID_CELL_DEG)}`;
+      let arr = grid.get(key);
+      if (!arr) { arr = []; grid.set(key, arr); }
+      arr.push(id);
+    }
+    return grid;
+  }
+
+  function stopsNear(lat, lon, radiusM) {
+    if (!plannerState.stopGrid) plannerState.stopGrid = buildStopGrid();
+    const latCells = Math.ceil(radiusM / (GRID_CELL_DEG * 111320)) + 1;
+    const lonCellM = GRID_CELL_DEG * 111320 * Math.cos(lat * Math.PI / 180);
+    const lonCells = Math.ceil(radiusM / lonCellM) + 1;
+    const ci = Math.floor(lat / GRID_CELL_DEG);
+    const cj = Math.floor(lon / GRID_CELL_DEG);
+    const out = [];
+    for (let di = -latCells; di <= latCells; di++) {
+      for (let dj = -lonCells; dj <= lonCells; dj++) {
+        const cell = plannerState.stopGrid.get(`${ci + di}:${cj + dj}`);
+        if (!cell) continue;
+        for (const id of cell) {
+          const s = stopsData[id];
+          const d = metersBetween(lat, lon, s.lat, s.lon);
+          if (d <= radiusM) out.push([id, d]);
+        }
+      }
+    }
+    out.sort((a, b) => a[1] - b[1]);
+    return out;
+  }
+
+  function accessStops(lat, lon) {
+    let found = stopsNear(lat, lon, MAX_WALK_ORIGIN_M);
+    if (found.length === 0) found = stopsNear(lat, lon, MAX_WALK_ORIGIN_FALLBACK_M);
+    return found
+      .slice(0, MAX_ORIGIN_STOPS)
+      .map(([id, d]) => [id, Math.round(d / WALK_SPEED_MPS)]);
+  }
+
+  // ---- Transferts à pied entre arrêts proches ----------------------------
+
+  function ensureFootpaths() {
+    if (plannerState.footpaths) return;
+    const fp = new Map();
+    for (const [id, s] of Object.entries(stopsData)) {
+      const near = stopsNear(s.lat, s.lon, TRANSFER_RADIUS_M);
+      const list = [];
+      for (const [nid, d] of near) {
+        if (nid === id) continue;
+        list.push([nid, Math.round(d / WALK_SPEED_MPS) + TRANSFER_WALK_PENALTY_S]);
+      }
+      if (list.length) fp.set(id, list);
+    }
+    plannerState.footpaths = fp;
+  }
+
+  // ---- Construction de la table horaire du jour (patterns RAPTOR) --------
+  //
+  // Regroupe les trajets candidats du jour (déjà filtrés par calendrier via
+  // buildCandidatesForDate, y compris les trajets nocturnes de la veille avec
+  // offset 86400) par "pattern" = même route + même séquence exacte d'arrêts.
+  // Convention temporelle : temps "effectif" = temps GTFS brut - offset,
+  // exprimé en secondes depuis minuit du jour de la requête (cohérent avec
+  // compareTime = secOfDay + offset utilisé dans computeFeatures).
+
+  function tripDep(trip, si) { return trip.stops[si][1] - trip.offset; }
+  function tripArr(trip, si) { return trip.stops[si][0] - trip.offset; }
+
+  function buildPlannerTimetable(dateObj) {
+    const key = yyyymmdd(dateObj);
+    if (plannerState.timetableDateKey === key) return;
+    buildCandidatesForDate(dateObj);
+
+    const patternMap = new Map();
+    for (const c of state.candidates) {
+      const t = c.trip;
+      const stops = t[6];
+      const seqIdx = t[7];
+      if (seqIdx === undefined || !stopSequencesData) continue;
+      const stopIds = stopSequencesData[seqIdx];
+      if (!stopIds || stopIds.length !== stops.length || stops.length < 2) continue;
+      const sig = t[1] + "|" + seqIdx;
+      let p = patternMap.get(sig);
+      if (!p) {
+        p = { routeId: t[1], stopIds, trips: [] };
+        patternMap.set(sig, p);
+      }
+      p.trips.push({ stops, offset: c.offset, headsign: t[5], shapeId: t[3], tripId: t[0] });
+    }
+    const patterns = [...patternMap.values()];
+    for (const p of patterns) p.trips.sort((a, b) => tripDep(a, 0) - tripDep(b, 0));
+
+    const routesAtStop = new Map();
+    patterns.forEach((p, pi) => {
+      p.stopIds.forEach((sid, si) => {
+        let arr = routesAtStop.get(sid);
+        if (!arr) { arr = []; routesAtStop.set(sid, arr); }
+        arr.push([pi, si]);
+      });
+    });
+
+    plannerState.patterns = patterns;
+    plannerState.routesAtStop = routesAtStop;
+    plannerState.timetableDateKey = key;
+  }
+
+  // Premier trajet du pattern p attrapable à l'arrêt d'index si à partir de
+  // l'instant readyAt (recherche binaire ; hypothèse standard : pas de
+  // dépassement entre véhicules d'un même pattern).
+  function earliestTrip(p, si, readyAt) {
+    const trips = p.trips;
+    let lo = 0, hi = trips.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tripDep(trips[mid], si) < readyAt) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo < trips.length ? trips[lo] : null;
+  }
+
+  // ---- Cœur RAPTOR --------------------------------------------------------
+
+  function runRaptor(originStops, destStops, depSec) {
+    ensureFootpaths();
+    const INF = Infinity;
+    const bestArr = new Map();
+    const roundArr = [new Map()];
+    const parents = [new Map()];
+
+    for (const [sid, w] of originStops) {
+      const t = depSec + w;
+      if (t < (roundArr[0].get(sid) ?? INF)) {
+        roundArr[0].set(sid, t);
+        bestArr.set(sid, t);
+        parents[0].set(sid, { type: "origin", walkSec: w });
+      }
+    }
+    let marked = new Set(roundArr[0].keys());
+
+    for (let k = 1; k <= MAX_ROUNDS && marked.size; k++) {
+      roundArr[k] = new Map(roundArr[k - 1]);
+      parents[k] = new Map();
+
+      // Routes desservant au moins un arrêt marqué, avec le plus petit index
+      // marqué (on ne scanne le pattern qu'à partir de là).
+      const queue = new Map();
+      for (const sid of marked) {
+        const lst = plannerState.routesAtStop.get(sid);
+        if (!lst) continue;
+        for (const [pi, si] of lst) {
+          const cur = queue.get(pi);
+          if (cur === undefined || si < cur) queue.set(pi, si);
+        }
+      }
+
+      const newMarked = new Set();
+      for (const [pi, startIdx] of queue) {
+        const p = plannerState.patterns[pi];
+        let trip = null, boardIdx = -1;
+        for (let si = startIdx; si < p.stopIds.length; si++) {
+          const sid = p.stopIds[si];
+          if (trip) {
+            const arr = tripArr(trip, si);
+            if (arr < (bestArr.get(sid) ?? INF)) {
+              roundArr[k].set(sid, arr);
+              bestArr.set(sid, arr);
+              parents[k].set(sid, {
+                type: "ride", pattern: pi, trip, boardIdx, alightIdx: si,
+              });
+              newMarked.add(sid);
+            }
+          }
+          // Peut-on attraper un véhicule plus tôt à cet arrêt ?
+          const tauPrev = roundArr[k - 1].get(sid);
+          if (tauPrev !== undefined) {
+            const readyAt = tauPrev + (k > 1 ? TRANSFER_BUFFER_S : 0);
+            const cand = earliestTrip(p, si, readyAt);
+            if (cand && (!trip || tripDep(cand, si) < tripDep(trip, si))) {
+              trip = cand;
+              boardIdx = si;
+            }
+          }
+        }
+      }
+
+      // Relaxation des transferts à pied (un saut par round, standard RAPTOR).
+      for (const sid of [...newMarked]) {
+        const t0 = roundArr[k].get(sid);
+        const fps = plannerState.footpaths.get(sid);
+        if (!fps) continue;
+        for (const [nsid, w] of fps) {
+          const t = t0 + w;
+          if (t < (bestArr.get(nsid) ?? INF)) {
+            roundArr[k].set(nsid, t);
+            bestArr.set(nsid, t);
+            parents[k].set(nsid, { type: "walk", from: sid, walkSec: w });
+            newMarked.add(nsid);
+          }
+        }
+      }
+      marked = newMarked;
+    }
+
+    // Extraction des alternatives Pareto : pour chaque round, meilleure
+    // arrivée à destination (arrêt + marche finale) ; on ne garde que les
+    // rounds qui améliorent strictement l'arrivée.
+    const journeys = [];
+    let bestSoFar = INF;
+    for (let k = 1; k < roundArr.length; k++) {
+      let best = null;
+      for (const [sid, w] of destStops) {
+        const t = roundArr[k].get(sid);
+        if (t === undefined) continue;
+        const tot = t + w;
+        if (!best || tot < best.tot) best = { sid, walkSec: w, tot };
+      }
+      if (best && best.tot < bestSoFar) {
+        const legs = reconstructJourney(parents, k, best.sid);
+        if (legs && legs.some((l) => l.type === "ride")) {
+          bestSoFar = best.tot;
+          journeys.push({
+            departure: depSec,
+            arrival: best.tot,
+            finalWalkSec: best.walkSec,
+            transfers: legs.filter((l) => l.type === "ride").length - 1,
+            legs,
+          });
+        }
+      }
+    }
+    return journeys;
+  }
+
+  // Remonte les pointeurs parents depuis (arrêt, round) jusqu'à l'origine.
+  function reconstructJourney(parents, k, stopId) {
+    const legs = [];
+    let sid = stopId;
+    let guard = 0;
+    while (k >= 0 && guard++ < 200) {
+      const e = parents[k].get(sid);
+      if (!e) { k -= 1; continue; } // valeur héritée d'un round antérieur
+      if (e.type === "origin") {
+        legs.unshift({ type: "walkOrigin", toStop: sid, walkSec: e.walkSec });
+        return legs;
+      }
+      if (e.type === "walk") {
+        legs.unshift({ type: "walkTransfer", fromStop: e.from, toStop: sid, walkSec: e.walkSec });
+        sid = e.from;
+        continue; // même round : le prédécesseur a été marqué par un ride du round k
+      }
+      // ride
+      const p = plannerState.patterns[e.pattern];
+      legs.unshift({
+        type: "ride",
+        routeId: p.routeId,
+        headsign: e.trip.headsign,
+        shapeId: e.trip.shapeId,
+        trip: e.trip,
+        boardStop: p.stopIds[e.boardIdx],
+        alightStop: p.stopIds[e.alightIdx],
+        boardIdx: e.boardIdx,
+        alightIdx: e.alightIdx,
+        depSec: tripDep(e.trip, e.boardIdx),
+        arrSec: tripArr(e.trip, e.alightIdx),
+        nStops: e.alightIdx - e.boardIdx,
+      });
+      sid = p.stopIds[e.boardIdx];
+      k -= 1;
+    }
+    return null; // reconstruction incohérente : on écarte ce trajet
+  }
+
+  // ---- Recherche complète (points -> arrêts -> RAPTOR) --------------------
+
+  function planJourneys() {
+    const resultsEl = document.getElementById("plannerResults");
+    const hint = document.getElementById("plannerHint");
+    if (!plannerState.origin || !plannerState.dest) return;
+
+    if (!stopSequencesData || !tripsData.length || tripsData[0][7] === undefined) {
+      if (hint) hint.textContent =
+        "Données incompatibles : régénère data/ avec scripts/fetch_and_process.py --force.";
+      return;
+    }
+
+    buildPlannerTimetable(state.simTime);
+    const depSec =
+      state.simTime.getHours() * 3600 +
+      state.simTime.getMinutes() * 60 +
+      state.simTime.getSeconds();
+
+    const originStops = accessStops(plannerState.origin.lat, plannerState.origin.lon);
+    const destStops = accessStops(plannerState.dest.lat, plannerState.dest.lon);
+    if (!originStops.length || !destStops.length) {
+      renderJourneys([], "Aucun arrêt à distance de marche d'un des deux points.");
+      return;
+    }
+
+    const journeys = runRaptor(originStops, destStops, depSec);
+    plannerState.journeys = journeys;
+    renderJourneys(
+      journeys,
+      journeys.length
+        ? null
+        : "Aucun itinéraire trouvé à cette heure (essaie une autre heure ou d'autres points)."
+    );
+    if (journeys.length) drawJourney(journeys[0]);
+    if (resultsEl) resultsEl.scrollTop = 0;
+  }
+
+  // ---- Rendu des résultats -------------------------------------------------
+
+  function fmtHM(sec) {
+    const s = ((sec % 86400) + 86400) % 86400;
+    return `${pad2(Math.floor(s / 3600))}:${pad2(Math.floor((s % 3600) / 60))}`;
+  }
+
+  function fmtDurationMin(sec) {
+    const m = Math.max(1, Math.round(sec / 60));
+    return m >= 60 ? `${Math.floor(m / 60)} h ${pad2(m % 60)}` : `${m} min`;
+  }
+
+  function stopName(id) {
+    const s = stopsData[id];
+    return s ? s.name : id;
+  }
+
+  function renderJourneys(journeys, emptyMessage) {
+    const el = document.getElementById("plannerResults");
+    if (!el) return;
+    el.innerHTML = "";
+    if (!journeys.length) {
+      if (emptyMessage) {
+        const p = document.createElement("p");
+        p.className = "planner-empty";
+        p.textContent = emptyMessage;
+        el.appendChild(p);
+      }
+      return;
+    }
+    journeys.forEach((j, ji) => {
+      const div = document.createElement("div");
+      div.className = "journey" + (ji === 0 ? " journey-selected" : "");
+      const dur = j.arrival - j.departure;
+      const transfersLabel =
+        j.transfers === 0 ? "direct" : `${j.transfers} corresp.`;
+      let html =
+        `<div class="journey-head">` +
+        `<span class="journey-times">${fmtHM(j.departure)} → ${fmtHM(j.arrival)}</span>` +
+        `<span class="journey-meta">${fmtDurationMin(dur)} · ${transfersLabel}</span>` +
+        `</div><ul class="journey-legs">`;
+      for (const leg of j.legs) {
+        if (leg.type === "walkOrigin") {
+          html += `<li class="leg leg-walk">🚶 ${fmtDurationMin(leg.walkSec)} à pied vers <b>${escapeHtml(stopName(leg.toStop))}</b></li>`;
+        } else if (leg.type === "walkTransfer") {
+          html += `<li class="leg leg-walk">🚶 ${fmtDurationMin(leg.walkSec)} à pied vers <b>${escapeHtml(stopName(leg.toStop))}</b></li>`;
+        } else {
+          const r = routesData[leg.routeId] || {};
+          const color = "#" + (r.color || "1d4ed8");
+          const textColor = "#" + (r.text_color || "ffffff");
+          html +=
+            `<li class="leg leg-ride">` +
+            `<span class="leg-line" style="background:${color};color:${textColor}">${escapeHtml(r.short_name || "?")}</span>` +
+            `<span class="leg-detail">dir. ${escapeHtml(leg.headsign || "—")}<br>` +
+            `<b>${escapeHtml(stopName(leg.boardStop))}</b> ${fmtHM(leg.depSec)} → ` +
+            `<b>${escapeHtml(stopName(leg.alightStop))}</b> ${fmtHM(leg.arrSec)}` +
+            ` <span class="leg-nstops">(${leg.nStops} arrêt${leg.nStops > 1 ? "s" : ""})</span></span>` +
+            `</li>`;
+        }
+      }
+      if (j.finalWalkSec > 0) {
+        html += `<li class="leg leg-walk">🚶 ${fmtDurationMin(j.finalWalkSec)} à pied jusqu'à destination</li>`;
+      }
+      html += `</ul>`;
+      div.innerHTML = html;
+      div.addEventListener("click", () => {
+        el.querySelectorAll(".journey").forEach((n) => n.classList.remove("journey-selected"));
+        div.classList.add("journey-selected");
+        drawJourney(j);
+      });
+      el.appendChild(div);
+    });
+  }
+
+  // ---- Tracé de l'itinéraire sur la carte ----------------------------------
+
+  function shapeSegment(shapeId, d0, d1) {
+    const shape = shapesData[shapeId];
+    if (!shape) return null;
+    if (d1 < d0) { const t = d0; d0 = d1; d1 = t; }
+    const coords = [positionOnShape(shape, d0)];
+    for (const pt of shape) {
+      if (pt[0] > d0 && pt[0] < d1) coords.push([pt[1], pt[2]]);
+    }
+    coords.push(positionOnShape(shape, d1));
+    return coords;
+  }
+
+  function legLineCoords(leg) {
+    if (leg.shapeId && shapesData[leg.shapeId]) {
+      const seg = shapeSegment(
+        leg.shapeId,
+        leg.trip.stops[leg.boardIdx][2],
+        leg.trip.stops[leg.alightIdx][2]
+      );
+      if (seg && seg.length >= 2) return seg;
+    }
+    const a = stopsData[leg.boardStop];
+    const b = stopsData[leg.alightStop];
+    if (!a || !b) return null;
+    return [[a.lon, a.lat], [b.lon, b.lat]];
+  }
+
+  function drawJourney(j) {
+    if (!map.getSource("journey")) return;
+    const features = [];
+    let prevPoint = plannerState.origin ? [plannerState.origin.lon, plannerState.origin.lat] : null;
+    for (const leg of j.legs) {
+      if (leg.type === "ride") {
+        const coords = legLineCoords(leg);
+        if (coords) {
+          const r = routesData[leg.routeId] || {};
+          features.push({
+            type: "Feature",
+            properties: { kind: "ride", color: "#" + (r.color || "1d4ed8") },
+            geometry: { type: "LineString", coordinates: coords },
+          });
+          prevPoint = coords[coords.length - 1];
+        }
+      } else {
+        const to = stopsData[leg.toStop];
+        if (prevPoint && to) {
+          features.push({
+            type: "Feature",
+            properties: { kind: "walk", color: "#64748b" },
+            geometry: { type: "LineString", coordinates: [prevPoint, [to.lon, to.lat]] },
+          });
+        }
+        if (to) prevPoint = [to.lon, to.lat];
+      }
+    }
+    if (prevPoint && plannerState.dest) {
+      features.push({
+        type: "Feature",
+        properties: { kind: "walk", color: "#64748b" },
+        geometry: {
+          type: "LineString",
+          coordinates: [prevPoint, [plannerState.dest.lon, plannerState.dest.lat]],
+        },
+      });
+    }
+    map.getSource("journey").setData({ type: "FeatureCollection", features });
+  }
+
+  function clearJourneyDrawing() {
+    if (map.getSource("journey")) {
+      map.getSource("journey").setData({ type: "FeatureCollection", features: [] });
+    }
+  }
+
+  function addJourneyLayer() {
+    map.addSource("journey", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    map.addLayer({
+      id: "journey-line",
+      type: "line",
+      source: "journey",
+      filter: ["==", ["get", "kind"], "ride"],
+      paint: { "line-color": ["get", "color"], "line-width": 5, "line-opacity": 0.85 },
+    });
+    map.addLayer({
+      id: "journey-walk",
+      type: "line",
+      source: "journey",
+      filter: ["==", ["get", "kind"], "walk"],
+      paint: {
+        "line-color": ["get", "color"],
+        "line-width": 3,
+        "line-opacity": 0.8,
+        "line-dasharray": [1, 1.6],
+      },
+    });
+  }
+
+  // ---- Interaction : choix des points sur la carte -------------------------
+
+  function setPickMode(mode) {
+    plannerState.picking = plannerState.picking === mode ? null : mode;
+    const originBtn = document.getElementById("plannerOriginBtn");
+    const destBtn = document.getElementById("plannerDestBtn");
+    if (originBtn) originBtn.classList.toggle("btn-active", plannerState.picking === "origin");
+    if (destBtn) destBtn.classList.toggle("btn-active", plannerState.picking === "dest");
+    map.getCanvas().style.cursor = plannerState.picking ? "crosshair" : "";
+    const hint = document.getElementById("plannerHint");
+    if (hint && plannerState.picking) {
+      hint.textContent = plannerState.picking === "origin"
+        ? "Clique sur la carte pour placer le point de départ."
+        : "Clique sur la carte pour placer le point d'arrivée.";
+    }
+  }
+
+  function placePlannerPoint(lngLat) {
+    const mode = plannerState.picking;
+    if (!mode) return;
+    const point = { lon: lngLat.lng, lat: lngLat.lat };
+    const isOrigin = mode === "origin";
+    const markerKey = isOrigin ? "originMarker" : "destMarker";
+    if (plannerState[markerKey]) plannerState[markerKey].remove();
+    plannerState[markerKey] = new maplibregl.Marker({ color: isOrigin ? "#4ade80" : "#ef4444" })
+      .setLngLat([point.lon, point.lat])
+      .addTo(map);
+    plannerState[isOrigin ? "origin" : "dest"] = point;
+    setPickMode(mode); // désactive le mode après placement
+
+    const hint = document.getElementById("plannerHint");
+    const searchBtn = document.getElementById("plannerSearchBtn");
+    const ready = plannerState.origin && plannerState.dest;
+    if (searchBtn) searchBtn.disabled = !ready;
+    if (hint) {
+      hint.textContent = ready
+        ? "Prêt — la recherche part à la date/heure de la simulation ci-dessus."
+        : (isOrigin ? "Départ placé. Place maintenant l'arrivée." : "Arrivée placée. Place maintenant le départ.");
+    }
+  }
+
+  function clearPlanner() {
+    if (plannerState.originMarker) plannerState.originMarker.remove();
+    if (plannerState.destMarker) plannerState.destMarker.remove();
+    plannerState.originMarker = plannerState.destMarker = null;
+    plannerState.origin = plannerState.dest = null;
+    plannerState.journeys = [];
+    if (plannerState.picking) setPickMode(plannerState.picking);
+    clearJourneyDrawing();
+    const el = document.getElementById("plannerResults");
+    if (el) el.innerHTML = "";
+    const searchBtn = document.getElementById("plannerSearchBtn");
+    if (searchBtn) searchBtn.disabled = true;
+    const hint = document.getElementById("plannerHint");
+    if (hint) hint.textContent = "Choisis un départ et une arrivée sur la carte.";
   }
 
   // ------------------------------------------------------------------------
@@ -688,7 +1293,34 @@
         "circle-stroke-color": "#ffffff",
       },
     });
+    // Noms des arrêts (couche indépendante, masquée par défaut, pilotée par
+    // la case "Afficher les noms des arrêts").
+    map.addLayer({
+      id: "stops-labels",
+      type: "symbol",
+      source: "stops",
+      layout: {
+        visibility: "none",
+        "text-field": ["get", "name"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 12, 9, 16, 12],
+        "text-font": ["Noto Sans Regular"],
+        "text-offset": [0, 0.9],
+        "text-anchor": "top",
+        "text-max-width": 9,
+        // Laisse MapLibre gérer la densité : les labels en collision sont
+        // masqués automatiquement plutôt que de saturer la carte.
+        "text-allow-overlap": false,
+        "text-optional": true,
+      },
+      paint: {
+        "text-color": "#334155",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 1.4,
+      },
+    });
+
     map.on("click", "stops-layer", (e) => {
+      if (plannerState.picking) return; // le clic sert à placer un point du planificateur
       const f = e.features[0];
       openBoard(f.properties.id, f.properties.name);
     });
@@ -733,6 +1365,7 @@
     });
 
     map.on("click", "vehicles-circle", (e) => {
+      if (plannerState.picking) return;
       const f = e.features[0];
       const p = f.properties;
       new maplibregl.Popup({ closeButton: false })
@@ -915,6 +1548,32 @@
       }
     });
 
+    const stopsNamesToggle = document.getElementById("stopsNamesToggle");
+    if (stopsNamesToggle) {
+      stopsNamesToggle.addEventListener("change", () => {
+        if (map.getLayer("stops-labels")) {
+          map.setLayoutProperty(
+            "stops-labels",
+            "visibility",
+            stopsNamesToggle.checked ? "visible" : "none"
+          );
+        }
+      });
+    }
+
+    // Planificateur d'itinéraire
+    const plannerOriginBtn = document.getElementById("plannerOriginBtn");
+    const plannerDestBtn = document.getElementById("plannerDestBtn");
+    const plannerSearchBtn = document.getElementById("plannerSearchBtn");
+    const plannerClearBtn = document.getElementById("plannerClearBtn");
+    if (plannerOriginBtn) plannerOriginBtn.addEventListener("click", () => setPickMode("origin"));
+    if (plannerDestBtn) plannerDestBtn.addEventListener("click", () => setPickMode("dest"));
+    if (plannerSearchBtn) plannerSearchBtn.addEventListener("click", planJourneys);
+    if (plannerClearBtn) plannerClearBtn.addEventListener("click", clearPlanner);
+    map.on("click", (e) => {
+      if (plannerState.picking) placePlannerPoint(e.lngLat);
+    });
+
     panelToggle.addEventListener("click", () => {
       document.body.classList.toggle("panel-collapsed");
     });
@@ -972,6 +1631,7 @@
     addStopsLayer();
     addVehiclesLayer();
     addRealtimeLayer();
+    addJourneyLayer();
     vehiclesLoaded = true;
     document.getElementById("loadingOverlay").classList.add("hidden");
 
