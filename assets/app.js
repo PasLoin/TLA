@@ -101,16 +101,35 @@
     });
   }
 
-  function getTurnstileToken() {
+  function waitForTurnstile(timeoutMs) {
     return new Promise((resolve, reject) => {
+      if (typeof turnstile !== "undefined") {
+        resolve();
+        return;
+      }
+      const start = Date.now();
+      const interval = setInterval(() => {
+        if (typeof turnstile !== "undefined") {
+          clearInterval(interval);
+          resolve();
+        } else if (Date.now() - start > timeoutMs) {
+          clearInterval(interval);
+          reject(new Error("Turnstile indisponible (script non chargé)"));
+        }
+      }, 150);
+    });
+  }
+
+  function getTurnstileToken() {
+    return waitForTurnstile(5000).then(() => new Promise((resolve, reject) => {
       ensureTurnstileWidget();
-      if (typeof turnstile === "undefined" || turnstileWidgetId === null) {
-        reject(new Error("Turnstile indisponible (script non chargé ?)"));
+      if (turnstileWidgetId === null) {
+        reject(new Error("Turnstile indisponible (widget non initialisé)"));
         return;
       }
       turnstilePending = { resolve, reject };
       turnstile.execute(turnstileWidgetId);
-    });
+    }));
   }
 
   function readCachedSessionToken() {
