@@ -60,6 +60,99 @@
 
   const REALTIME_PROXY_URL = "https://stib-realtime-proxy.pulpfiction4651694.workers.dev" // ;
 
+  // ------------------------------------------------------------------------
+  // Turnstile + jeton de session (protection du proxy Cloudflare)
+  // ------------------------------------------------------------------------
+  // Nécessite dans index.html, avant ce script :
+  //   <div id="turnstile-widget"></div>
+  //   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+  const TURNSTILE_SITE_KEY = "0x4AAAAAADxtAE5tSTX4U9TW";
+  const SESSION_STORAGE_KEY = "stib_session_token_v1";
+
+  let turnstileWidgetId = null;
+  let turnstilePending = null;
+
+  function ensureTurnstileWidget() {
+    if (turnstileWidgetId !== null || typeof turnstile === "undefined") return;
+    const container = document.getElementById("turnstile-widget");
+    if (!container) return;
+    turnstileWidgetId = turnstile.render(container, {
+      sitekey: TURNSTILE_SITE_KEY,
+      size: "invisible",
+      execution: "execute",
+      callback: (token) => {
+        if (turnstilePending) {
+          turnstilePending.resolve(token);
+          turnstilePending = null;
+        }
+      },
+      "error-callback": () => {
+        if (turnstilePending) {
+          turnstilePending.reject(new Error("Échec du challenge Turnstile"));
+          turnstilePending = null;
+        }
+      },
+      "expired-callback": () => {
+        if (turnstilePending) {
+          turnstilePending.reject(new Error("Challenge Turnstile expiré"));
+          turnstilePending = null;
+        }
+      },
+    });
+  }
+
+  function getTurnstileToken() {
+    return new Promise((resolve, reject) => {
+      ensureTurnstileWidget();
+      if (typeof turnstile === "undefined" || turnstileWidgetId === null) {
+        reject(new Error("Turnstile indisponible (script non chargé ?)"));
+        return;
+      }
+      turnstilePending = { resolve, reject };
+      turnstile.execute(turnstileWidgetId);
+    });
+  }
+
+  function readCachedSessionToken() {
+    try {
+      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (!raw) return null;
+      const { token, expiresAt } = JSON.parse(raw);
+      if (typeof token === "string" && Date.now() < expiresAt) return token;
+    } catch {
+      /* stockage indisponible ou corrompu : on ignore */
+    }
+    return null;
+  }
+
+  function writeCachedSessionToken(token, expiresInSeconds) {
+    try {
+      const expiresAt = Date.now() + Math.max(0, (expiresInSeconds || 1800) - 30) * 1000;
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ token, expiresAt }));
+    } catch {
+      /* pas grave si on ne peut pas mettre en cache */
+    }
+  }
+
+  async function requestNewSessionToken() {
+    const turnstileToken = await getTurnstileToken();
+    const res = await fetch(`${REALTIME_PROXY_URL}/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: turnstileToken }),
+    });
+    if (!res.ok) throw new Error(`Échec de la vérification (HTTP ${res.status})`);
+    const data = await res.json();
+    writeCachedSessionToken(data.sessionToken, data.expiresIn);
+    return data.sessionToken;
+  }
+
+  async function getRealtimeSessionToken() {
+    const cached = readCachedSessionToken();
+    if (cached) return cached;
+    return requestNewSessionToken();
+  }
+
   const ROUTE_TYPE_RADIUS = { 0: 6, 1: 7, 3: 5 }; // tram, métro, bus
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
 
@@ -1046,7 +1139,11 @@
     if (status) status.textContent = "Appel de l'API en cours…";
 
     try {
-      const res = await fetch(`${REALTIME_PROXY_URL}?dataset=VehiclePositions`, { cache: "no-store" });
+      const sessionToken = await getRealtimeSessionToken();
+      const res = await fetch(`${REALTIME_PROXY_URL}?dataset=VehiclePositions`, {
+        cache: "no-store",
+        headers: { "X-Session-Token": sessionToken },
+      });
       if (!res.ok) throw new Error(`Réponse ${res.status}`);
       const data = await res.json();
       const features = realtimeFeaturesFromResults(data.results || []);
@@ -1222,7 +1319,11 @@
         dataset: "WaitingTimes",
         where: `pointid="${boardState.stopId}"`,
       });
-      const res = await fetch(`${REALTIME_PROXY_URL}?${params.toString()}`, { cache: "no-store" });
+      const sessionToken = await getRealtimeSessionToken();
+      const res = await fetch(`${REALTIME_PROXY_URL}?${params.toString()}`, {
+        cache: "no-store",
+        headers: { "X-Session-Token": sessionToken },
+      });
       if (!res.ok) throw new Error(`Réponse ${res.status}`);
       const data = await res.json();
       console.log("WaitingTimes brut pour", boardState.stopId, data);
