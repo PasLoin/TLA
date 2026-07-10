@@ -180,9 +180,11 @@
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
 
   // Couleurs des arrêts par mode (data/stop_modes.json, dérivé d'OSM — voir
-  // scripts/build_stop_modes.py). Priorité d'affichage quand un arrêt cumule
-  // plusieurs modes (ex: pôle bus+tram) : métro > tram > bus.
-  const STOP_MODE_COLORS = { subway: "#7c3aed", tram: "#0891b2", bus: "#475569" };
+  // scripts/build_stop_modes.py). Reprend les couleurs de la légende
+  // véhicules (.legend-dot-metro/tram/bus dans style.css) pour que les
+  // arrêts et la légende s'accordent. Priorité d'affichage quand un arrêt
+  // cumule plusieurs modes (ex: pôle bus+tram) : métro > tram > bus.
+  const STOP_MODE_COLORS = { subway: "#d6356c", tram: "#f08a24", bus: "#2fb4d6" };
   const STOP_MODE_PRIORITY = ["subway", "tram", "bus"];
   const STOP_MODE_DEFAULT_COLOR = "#475569";
 
