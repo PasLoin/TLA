@@ -12,6 +12,10 @@ Sortie (dans data/) :
   meta.json            métadonnées (version du flux, dates, compteurs, hash)
   routes.json          { route_id: {short_name, long_name, type, color, text_color} }
   stops.json           { stop_id: {name, lat, lon} }
+                         (uniquement les arrêts desservis par au moins un
+                         trajet planifié — les entrées/sorties de station et
+                         autres points GTFS jamais visités par un véhicule
+                         sont filtrés, voir le filtre après stop_times.txt)
   shapes.json          { shape_id: [[dist_km, lon, lat], ...] }  (simplifié RDP)
   calendar.json         [ {service_id, days:[L,Ma,Me,J,V,S,D], start_date, end_date} ]
   calendar_dates.json   [ {service_id, date, exception_type} ]
@@ -299,9 +303,11 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
     # glisser le véhicule en continu d'un arrêt à l'autre.
     log("Traitement stop_times.txt (peut prendre un moment)")
     stop_times_by_trip: Dict[str, List[Tuple[int, int, int, str]]] = {}
+    referenced_stop_ids: set = set()
     for row in read_rows(zf, "stop_times.txt"):
         trip_id = row["trip_id"]
         seq = int(row["stop_sequence"])
+        referenced_stop_ids.add(row["stop_id"])
         arr_t = time_to_seconds(row.get("arrival_time"))
         dep_t = time_to_seconds(row.get("departure_time"))
         if arr_t is None:
@@ -313,6 +319,13 @@ def process(zip_bytes: bytes, source_url: str) -> Dict:
         if dep_t < arr_t:
             dep_t = arr_t  # garde-fou : un flux mal formé ne doit pas inverser l'ordre
         stop_times_by_trip.setdefault(trip_id, []).append((seq, arr_t, dep_t, row["stop_id"]))
+
+    # ---- filtre les entrées/sorties de station et autres "stops" GTFS
+    #      jamais desservis par un trajet (aucun véhicule n'y passe jamais,
+    #      elles ne font que polluer la carte) ----
+    n_stops_before = len(stops)
+    stops = {sid: s for sid, s in stops.items() if sid in referenced_stop_ids}
+    log(f"  arrêts filtrés (non desservis par un trajet) : {n_stops_before - len(stops)} retirés, {len(stops)} conservés")
 
     # ---- projection des arrêts sur les tracés (avec cache + recherche
     #      "vers l'avant" pour rester monotone même sur des lignes en boucle) ----
