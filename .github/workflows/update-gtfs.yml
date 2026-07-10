@@ -32,19 +32,28 @@ jobs:
         id: gtfs
         run: python scripts/fetch_and_process.py
 
+      - name: Build stop modes from OSM (bus/tram/métro)
+        id: stopmodes
+        continue-on-error: true
+        run: python scripts/build_stop_modes.py
+
+      - name: Warn if stop modes build failed
+        if: steps.stopmodes.outcome == 'failure'
+        run: echo "::warning::build_stop_modes.py a échoué — data/stop_modes.json conservé tel quel."
+
       - name: Commit & push if changed
-        if: steps.gtfs.outputs.changed == 'true'
+        if: steps.gtfs.outputs.changed == 'true' || steps.stopmodes.outcome == 'success'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
           if git diff --cached --quiet; then
-            echo "Rien à committer (diff vide malgré changed=true)."
+            echo "Rien à committer (diff vide)."
           else
             git commit -m "chore: update GTFS data ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
             git push
           fi
 
       - name: No changes
-        if: steps.gtfs.outputs.changed != 'true'
-        run: echo "Flux GTFS inchangé, rien à publier aujourd'hui."
+        if: steps.gtfs.outputs.changed != 'true' && steps.stopmodes.outcome != 'success'
+        run: echo "Flux GTFS et données OSM inchangés, rien à publier aujourd'hui."

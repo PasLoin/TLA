@@ -23,6 +23,10 @@
      stop_sequences.json : [ [stop_id, ...], ... ] séquences d'arrêts dédupliquées
      stop_shape_index.json : { route_short_name: { stop_id: [shape_id, dist_km] } }
        (sert uniquement au mode "temps réel manuel" ci-dessous)
+     stop_modes.json : { meta, modes: { stop_id: ["bus"|"tram"|"subway", ...] } }
+       (optionnel — dérivé d'OSM, voir scripts/build_stop_modes.py ; absent
+       tant que le pipeline ne l'a pas généré, les arrêts non couverts
+       gardent la couleur par défaut)
 
    --------------------------------------------------------------------------
    Planificateur d'itinéraire (RAPTOR)
@@ -175,6 +179,13 @@
   const ROUTE_TYPE_RADIUS = { 0: 6, 1: 7, 3: 5 }; // tram, métro, bus
   const ROUTE_TYPE_DEFAULT_RADIUS = 5.5;
 
+  // Couleurs des arrêts par mode (data/stop_modes.json, dérivé d'OSM — voir
+  // scripts/build_stop_modes.py). Priorité d'affichage quand un arrêt cumule
+  // plusieurs modes (ex: pôle bus+tram) : métro > tram > bus.
+  const STOP_MODE_COLORS = { subway: "#7c3aed", tram: "#0891b2", bus: "#475569" };
+  const STOP_MODE_PRIORITY = ["subway", "tram", "bus"];
+  const STOP_MODE_DEFAULT_COLOR = "#475569";
+
   // ------------------------------------------------------------------------
   // État global de la simulation
   // ------------------------------------------------------------------------
@@ -189,6 +200,7 @@
 
   let routesData = {};
   let stopsData = {};
+  let stopModesData = {}; // stop_id -> ["bus","tram",...] — voir data/stop_modes.json
   let shapesData = {};
   let calendarData = [];
   let exceptionsByDate = new Map(); // 'YYYYMMDD' -> {added:Set, removed:Set}
@@ -258,6 +270,16 @@
       stopSequencesData = await fetchJSON("stop_sequences.json");
     } catch (e) {
       stopSequencesData = null;
+    }
+
+    // Optionnel : modes de transport par arrêt (bus/tram/métro), dérivés
+    // d'OSM. Absent si le pipeline n'a pas encore régénéré ce fichier, ou si
+    // scripts/build_stop_modes.py a échoué lors d'un run CI (non bloquant).
+    try {
+      const stopModes = await fetchJSON("stop_modes.json");
+      stopModesData = stopModes.modes || {};
+    } catch (e) {
+      stopModesData = {};
     }
 
     routesData = routes;
@@ -1393,10 +1415,19 @@
     );
   }
 
+  function colorForStopModes(id) {
+    const modes = stopModesData[id];
+    if (!modes || !modes.length) return STOP_MODE_DEFAULT_COLOR;
+    for (const mode of STOP_MODE_PRIORITY) {
+      if (modes.includes(mode)) return STOP_MODE_COLORS[mode];
+    }
+    return STOP_MODE_DEFAULT_COLOR;
+  }
+
   function addStopsLayer() {
     const features = Object.entries(stopsData).map(([id, s]) => ({
       type: "Feature",
-      properties: { id, name: s.name },
+      properties: { id, name: s.name, modeColor: colorForStopModes(id) },
       geometry: { type: "Point", coordinates: [s.lon, s.lat] },
     }));
     map.addSource("stops", { type: "geojson", data: { type: "FeatureCollection", features } });
@@ -1407,7 +1438,7 @@
       layout: { visibility: "none" },
       paint: {
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2.5, 16, 5.5],
-        "circle-color": "#475569",
+        "circle-color": ["get", "modeColor"],
         "circle-opacity": 0.95,
         "circle-stroke-width": 1.2,
         "circle-stroke-color": "#ffffff",
