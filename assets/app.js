@@ -30,6 +30,11 @@
      platforms.json : { meta, platforms: [ {stop_ids, modes, closed, coords}, ... ] }
        (optionnel — géométrie réelle des quais depuis OSM, voir
        scripts/build_platforms.py ; affiché uniquement à fort zoom)
+     footpaths.json : { meta, footpaths: { stop_id: [[other_stop_id, seconds], ...] } }
+       (optionnel — correspondances à pied calculées sur le réseau piéton
+       OSM (escaliers, ascenseurs...), voir scripts/build_footpaths.py ;
+       remplace l'estimation à vol d'oiseau dans ensureFootpaths() quand
+       disponible pour la paire d'arrêts)
 
    --------------------------------------------------------------------------
    Planificateur d'itinéraire (RAPTOR)
@@ -207,6 +212,7 @@
   let stopsData = {};
   let stopModesData = {}; // stop_id -> ["bus","tram",...] — voir data/stop_modes.json
   let platformsData = []; // [{stop_ids, modes, closed, coords}, ...] — voir data/platforms.json
+  let footpathsOsmData = {}; // stop_id -> [[other_stop_id, seconds], ...] — voir data/footpaths.json
   let shapesData = {};
   let calendarData = [];
   let exceptionsByDate = new Map(); // 'YYYYMMDD' -> {added:Set, removed:Set}
@@ -294,6 +300,17 @@
       platformsData = platforms.platforms || [];
     } catch (e) {
       platformsData = [];
+    }
+
+    // Optionnel : correspondances à pied calculées sur le réseau piéton OSM
+    // (escaliers, ascenseurs...), voir scripts/build_footpaths.py. Vient
+    // remplacer, quand elle existe, l'estimation à vol d'oiseau dans
+    // ensureFootpaths() ci-dessous.
+    try {
+      const footpaths = await fetchJSON("footpaths.json");
+      footpathsOsmData = footpaths.footpaths || {};
+    } catch (e) {
+      footpathsOsmData = {};
     }
 
     routesData = routes;
@@ -612,12 +629,22 @@
     const fp = new Map();
     for (const [id, s] of Object.entries(stopsData)) {
       const near = stopsNear(s.lat, s.lon, TRANSFER_RADIUS_M);
-      const list = [];
+      const byNeighbor = new Map();
       for (const [nid, d] of near) {
         if (nid === id) continue;
-        list.push([nid, Math.round(d / WALK_SPEED_MPS) + TRANSFER_WALK_PENALTY_S]);
+        byNeighbor.set(nid, Math.round(d / WALK_SPEED_MPS) + TRANSFER_WALK_PENALTY_S);
       }
-      if (list.length) fp.set(id, list);
+      // Remplace (ou complète) l'estimation à vol d'oiseau par le temps réel
+      // calculé sur le réseau piéton OSM (escaliers, ascenseurs...) quand il
+      // est disponible pour cette paire — voir scripts/build_footpaths.py.
+      const osmList = footpathsOsmData[id];
+      if (osmList) {
+        for (const [nid, sec] of osmList) {
+          if (nid === id) continue;
+          byNeighbor.set(nid, sec);
+        }
+      }
+      if (byNeighbor.size) fp.set(id, Array.from(byNeighbor.entries()));
     }
     plannerState.footpaths = fp;
   }

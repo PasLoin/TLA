@@ -42,12 +42,17 @@ jobs:
         continue-on-error: true
         run: python scripts/build_platforms.py
 
+      - name: Build indoor footpaths from OSM (escaliers/ascenseurs)
+        id: footpaths
+        continue-on-error: true
+        run: python scripts/build_footpaths.py
+
       - name: Warn if an OSM build step failed
-        if: steps.stopmodes.outcome == 'failure' || steps.platforms.outcome == 'failure'
+        if: steps.stopmodes.outcome == 'failure' || steps.platforms.outcome == 'failure' || steps.footpaths.outcome == 'failure'
         run: echo "::warning::Une étape OSM a échoué — le(s) fichier(s) data/ concerné(s) sont conservés tels quels."
 
       - name: Commit & push if changed
-        if: steps.gtfs.outputs.changed == 'true' || steps.stopmodes.outcome == 'success' || steps.platforms.outcome == 'success'
+        if: steps.gtfs.outputs.changed == 'true' || steps.stopmodes.outcome == 'success' || steps.platforms.outcome == 'success' || steps.footpaths.outcome == 'success'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -60,5 +65,5 @@ jobs:
           fi
 
       - name: No changes
-        if: steps.gtfs.outputs.changed != 'true' && steps.stopmodes.outcome != 'success' && steps.platforms.outcome != 'success'
+        if: steps.gtfs.outputs.changed != 'true' && steps.stopmodes.outcome != 'success' && steps.platforms.outcome != 'success' && steps.footpaths.outcome != 'success'
         run: echo "Flux GTFS et données OSM inchangés, rien à publier aujourd'hui."
