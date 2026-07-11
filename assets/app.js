@@ -30,11 +30,16 @@
      platforms.json : { meta, platforms: [ {stop_ids, modes, closed, coords}, ... ] }
        (optionnel — géométrie réelle des quais depuis OSM, voir
        scripts/build_platforms.py ; affiché uniquement à fort zoom)
-     footpaths.json : { meta, footpaths: { stop_id: [[other_stop_id, seconds], ...] } }
+     footpaths.json : { meta, footpaths: { stop_id: [
+         [other_stop_id, seconds, segments, coords], ...
+       ] } }
        (optionnel — correspondances à pied calculées sur le réseau piéton
        OSM (escaliers, ascenseurs...), voir scripts/build_footpaths.py ;
        remplace l'estimation à vol d'oiseau dans ensureFootpaths() quand
-       disponible pour la paire d'arrêts)
+       disponible pour la paire d'arrêts. segments = détail pas-à-pas
+       (type/niveau/durée, voir formatWalkDetail) ; coords = [[lon,lat],...]
+       le tracé réel du chemin, utilisé par drawJourney() à la place du
+       trait pointillé)
 
    --------------------------------------------------------------------------
    Planificateur d'itinéraire (RAPTOR)
@@ -632,22 +637,23 @@
       const byNeighbor = new Map();
       for (const [nid, d] of near) {
         if (nid === id) continue;
-        // segments=null : pas de détail d'itinéraire pour l'estimation à vol
-        // d'oiseau (pas de tracé réel disponible pour cette paire).
-        byNeighbor.set(nid, [Math.round(d / WALK_SPEED_MPS) + TRANSFER_WALK_PENALTY_S, null]);
+        // segments/coords=null : pas de détail ni de tracé réel pour
+        // l'estimation à vol d'oiseau (pas de chemin OSM pour cette paire).
+        byNeighbor.set(nid, [Math.round(d / WALK_SPEED_MPS) + TRANSFER_WALK_PENALTY_S, null, null]);
       }
-      // Remplace (ou complète) l'estimation à vol d'oiseau par le temps réel
-      // calculé sur le réseau piéton OSM (escaliers, ascenseurs...) quand il
-      // est disponible pour cette paire — voir scripts/build_footpaths.py.
+      // Remplace (ou complète) l'estimation à vol d'oiseau par le temps et
+      // le tracé réels calculés sur le réseau piéton OSM (escaliers,
+      // ascenseurs...) quand disponibles pour cette paire — voir
+      // scripts/build_footpaths.py.
       const osmList = footpathsOsmData[id];
       if (osmList) {
-        for (const [nid, sec, segments] of osmList) {
+        for (const [nid, sec, segments, coords] of osmList) {
           if (nid === id) continue;
-          byNeighbor.set(nid, [sec, segments]);
+          byNeighbor.set(nid, [sec, segments, coords]);
         }
       }
       if (byNeighbor.size) {
-        fp.set(id, Array.from(byNeighbor.entries()).map(([nid, [sec, segments]]) => [nid, sec, segments]));
+        fp.set(id, Array.from(byNeighbor.entries()).map(([nid, [sec, segments, coords]]) => [nid, sec, segments, coords]));
       }
     }
     plannerState.footpaths = fp;
@@ -787,12 +793,12 @@
         const t0 = roundArr[k].get(sid);
         const fps = plannerState.footpaths.get(sid);
         if (!fps) continue;
-        for (const [nsid, w, segments] of fps) {
+        for (const [nsid, w, segments, coords] of fps) {
           const t = t0 + w;
           if (t < (bestArr.get(nsid) ?? INF)) {
             roundArr[k].set(nsid, t);
             bestArr.set(nsid, t);
-            parents[k].set(nsid, { type: "walk", from: sid, walkSec: w, segments });
+            parents[k].set(nsid, { type: "walk", from: sid, walkSec: w, segments, coords });
             newMarked.add(nsid);
           }
         }
@@ -843,7 +849,7 @@
         return legs;
       }
       if (e.type === "walk") {
-        legs.unshift({ type: "walkTransfer", fromStop: e.from, toStop: sid, walkSec: e.walkSec, segments: e.segments });
+        legs.unshift({ type: "walkTransfer", fromStop: e.from, toStop: sid, walkSec: e.walkSec, segments: e.segments, coords: e.coords });
         sid = e.from;
         continue; // même round : le prédécesseur a été marqué par un ride du round k
       }
@@ -1061,7 +1067,17 @@
         }
       } else {
         const to = stopsData[leg.toStop];
-        if (prevPoint && to) {
+        // Trace le chemin piéton réel (escaliers, couloirs...) quand on l'a
+        // calculé (voir scripts/build_footpaths.py) ; sinon un trait
+        // pointillé à vol d'oiseau, comme avant.
+        if (leg.coords && leg.coords.length >= 2) {
+          features.push({
+            type: "Feature",
+            properties: { kind: "walk-real", color: "#64748b" },
+            geometry: { type: "LineString", coordinates: leg.coords },
+          });
+          prevPoint = leg.coords[leg.coords.length - 1];
+        } else if (prevPoint && to) {
           features.push({
             type: "Feature",
             properties: { kind: "walk", color: "#64748b" },
@@ -1109,6 +1125,20 @@
         "line-width": 3,
         "line-opacity": 0.8,
         "line-dasharray": [1, 1.6],
+      },
+    });
+    // Chemin piéton réel (issu du graphe OSM, voir scripts/build_footpaths.py)
+    // — trait plein pour le distinguer du pointillé "à vol d'oiseau"
+    // ci-dessus, qui reste utilisé faute de données OSM pour la paire.
+    map.addLayer({
+      id: "journey-walk-real",
+      type: "line",
+      source: "journey",
+      filter: ["==", ["get", "kind"], "walk-real"],
+      paint: {
+        "line-color": ["get", "color"],
+        "line-width": 3,
+        "line-opacity": 0.85,
       },
     });
   }

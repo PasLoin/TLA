@@ -27,12 +27,17 @@ Principe :
 Sortie : data/footpaths.json
   { "meta": {generated_at, source, source_sha256, counts},
     "footpaths": { stop_id: [
-      [other_stop_id, seconds, [[kind, level_pair_or_null, seconds], ...]],
+      [other_stop_id, seconds, [[kind, level_pair_or_null, seconds], ...],
+        [[lon, lat], ...]],
       ...
     ] } }
   - kind : "walk" | "steps" | "elevator"
   - level_pair : [a, b] issu du tag OSM level="a;b" sur l'escalier/ascenseur
     (niveaux reliés, sans indication fiable de sens de parcours), ou null
+  - le dernier élément est la géométrie réelle du chemin (nœuds du graphe
+    piéton OSM traversés, simplifiée par RDP comme les tracés de lignes
+    dans fetch_and_process.py) — remplace le trait pointillé à vol
+    d'oiseau sur la carte quand elle est disponible pour la paire
 
 Usage:
     python scripts/build_footpaths.py
@@ -53,6 +58,7 @@ from typing import Dict, List, Optional, Tuple
 import osmium
 
 from build_stop_modes import PBF_URL, REF_TAG, download, sha256_hex, log
+from fetch_and_process import rdp_indices
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT_DIR, "data")
@@ -68,6 +74,8 @@ SNAP_MAX_M = 80          # distance max pour rattacher un arrêt au graphe piét
 ANCHOR_BUFFER_M = 400    # ne garde que les ways proches d'au moins un arrêt
 TIME_CUTOFF_S = 420      # horizon de recherche Dijkstra par arrêt (~7 min)
 MAX_NEIGHBORS = 8        # nb max de correspondances gardées par arrêt
+COORD_DECIMALS = 5       # ~1.1 m de précision, cohérent avec fetch_and_process.py
+RDP_EPSILON_DEG = 0.00004  # tolérance de simplification du tracé (~4 m)
 
 GRID_DEG = 0.004  # ~440 m à la latitude de Bruxelles, pour l'index spatial
 
@@ -271,28 +279,51 @@ def dijkstra(adj: Dict, source, cutoff_s: float) -> Tuple[Dict, Dict]:
 MIN_SEGMENT_S = 3  # segments plus courts fusionnés/ignorés (bruit du rattachement)
 
 
-def reconstruct_segments(prev: Dict, source, dest) -> List[List]:
-    """Reconstruit la suite d'arêtes de source à dest, puis fusionne les
-    arêtes consécutives de même type (et mêmes niveaux) en segments —
-    typiquement un long trottoir découpé en dizaines de ways OSM ne doit
-    donner qu'une seule ligne "à pied" dans l'instruction finale."""
-    edges = []
+def _coord_of(node, node_coords: Dict[int, Tuple[float, float]], anchors: Dict[str, Tuple[float, float]]) -> List[float]:
+    if isinstance(node, str) and node.startswith("stop:"):
+        lon, lat = anchors[node[len("stop:"):]]
+    else:
+        lon, lat = node_coords[node]
+    return [round(lon, COORD_DECIMALS), round(lat, COORD_DECIMALS)]
+
+
+def reconstruct_path(
+    prev: Dict, source, dest,
+    node_coords: Dict[int, Tuple[float, float]], anchors: Dict[str, Tuple[float, float]],
+) -> Tuple[List[List], List[List[float]]]:
+    """Reconstruit la suite d'arêtes de source à dest : d'un côté les
+    segments fusionnés par type ("walk"/"steps"/"elevator", niveaux) pour
+    les instructions, de l'autre la géométrie complète (simplifiée par RDP)
+    pour tracer le chemin réel sur la carte plutôt qu'un trait à vol
+    d'oiseau."""
+    chain: List[Tuple] = []  # (node, kind, level, seconds), de source (exclu) à dest
     node = dest
     guard = 0
     while node != source and node in prev and guard < 5000:
         guard += 1
         parent, kind, level, w = prev[node]
-        edges.append((kind, level, w))
+        chain.append((node, kind, level, w))
         node = parent
-    edges.reverse()
+    chain.reverse()
 
     segments: List[List] = []
-    for kind, level, w in edges:
+    for _, kind, level, w in chain:
         if segments and segments[-1][0] == kind and segments[-1][1] == level:
             segments[-1][2] += w
         else:
             segments.append([kind, level, w])
-    return [[k, list(lv) if lv else None, round(s)] for k, lv, s in segments if s >= MIN_SEGMENT_S or k != "walk"]
+    segments = [[k, list(lv) if lv else None, round(s)] for k, lv, s in segments if s >= MIN_SEGMENT_S or k != "walk"]
+
+    raw_coords = [_coord_of(source, node_coords, anchors)] + [
+        _coord_of(n, node_coords, anchors) for n, _, _, _ in chain
+    ]
+    if len(raw_coords) > 2:
+        keep_idx = rdp_indices([(lat, lon) for lon, lat in raw_coords], RDP_EPSILON_DEG)
+        coords = [raw_coords[i] for i in keep_idx]
+    else:
+        coords = raw_coords
+
+    return segments, coords
 
 
 def build_footpaths(anchors: Dict[str, Tuple[float, float]], graph: GraphBuilder) -> Dict[str, List[List]]:
@@ -334,10 +365,11 @@ def build_footpaths(anchors: Dict[str, Tuple[float, float]], graph: GraphBuilder
             continue
         others.sort(key=lambda x: x[1])
         kept = others[:MAX_NEIGHBORS]
-        footpaths[sid] = [
-            [oid, round(sec), reconstruct_segments(prev, vkey, stop_node_key.format(oid))]
-            for oid, sec in kept
-        ]
+        entries = []
+        for oid, sec in kept:
+            segments, coords = reconstruct_path(prev, vkey, stop_node_key.format(oid), graph.node_coords, anchors)
+            entries.append([oid, round(sec), segments, coords])
+        footpaths[sid] = entries
     return footpaths
 
 
