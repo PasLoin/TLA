@@ -385,6 +385,14 @@ select { font-family: var(--font-body); cursor: pointer; }
 }
 .leg b { color: var(--text); font-weight: 600; }
 .leg-walk { font-size: 10.5px; }
+.leg-walk-detail {
+  margin-top: 3px;
+  padding-left: 4px;
+  border-left: 2px solid var(--border, rgba(148,163,184,0.4));
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.6;
+}
 .leg-line {
   flex: 0 0 auto;
   min-width: 26px;

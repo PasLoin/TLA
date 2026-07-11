@@ -19,12 +19,20 @@ Principe :
      aux abords des arrêts (ANCHOR_BUFFER_M) pour rester compact.
   3. Applique une vitesse réduite + pénalité fixe sur les escaliers, et une
      pénalité d'attente/trajet sur les nœuds highway=elevator.
-  4. Pour chaque arrêt, lance un Dijkstra borné (TIME_CUTOFF_S) et garde les
-     N arrêts atteignables les plus proches.
+  4. Pour chaque arrêt, lance un Dijkstra borné (TIME_CUTOFF_S), garde les
+     N arrêts atteignables les plus proches, et reconstruit le chemin en
+     segments fusionnés par type ("walk"/"steps"/"elevator") pour permettre
+     des instructions ("prenez l'escalier", "ascenseur") côté client.
 
 Sortie : data/footpaths.json
   { "meta": {generated_at, source, source_sha256, counts},
-    "footpaths": { stop_id: [[other_stop_id, seconds], ...], ... } }
+    "footpaths": { stop_id: [
+      [other_stop_id, seconds, [[kind, level_pair_or_null, seconds], ...]],
+      ...
+    ] } }
+  - kind : "walk" | "steps" | "elevator"
+  - level_pair : [a, b] issu du tag OSM level="a;b" sur l'escalier/ascenseur
+    (niveaux reliés, sans indication fiable de sens de parcours), ou null
 
 Usage:
     python scripts/build_footpaths.py
@@ -77,6 +85,21 @@ def grid_key(lon: float, lat: float) -> Tuple[int, int]:
     return (int(math.floor(lon / GRID_DEG)), int(math.floor(lat / GRID_DEG)))
 
 
+def parse_level_pair(level_str: str) -> Optional[Tuple[float, float]]:
+    """Le tag OSM level="A;B" indique les deux niveaux reliés par un
+    escalier/ascenseur (ex: "0;-1"). On ignore les formats plus complexes
+    (single value, listes >2) faute de sens univoque pour une instruction."""
+    if not level_str:
+        return None
+    parts = [p.strip() for p in level_str.split(";") if p.strip()]
+    if len(parts) != 2:
+        return None
+    try:
+        return (float(parts[0]), float(parts[1]))
+    except ValueError:
+        return None
+
+
 class AnchorAndElevatorExtractor(osmium.SimpleHandler):
     """Première passe : localise les arrêts GTFS sur la carte et repère les
     nœuds highway=elevator (quasi tous membres du graphe piéton, cf. analyse
@@ -87,11 +110,13 @@ class AnchorAndElevatorExtractor(osmium.SimpleHandler):
         self.anchor_primary: Dict[str, Tuple[float, float]] = {}
         self.anchor_fallback: Dict[str, List[Tuple[float, float]]] = defaultdict(list)
         self.elevator_ids: set = set()
+        self.elevator_levels: Dict[int, Optional[Tuple[float, float]]] = {}
 
     def node(self, n) -> None:
         tags = dict(n.tags)
         if tags.get("highway") == "elevator":
             self.elevator_ids.add(n.id)
+            self.elevator_levels[n.id] = parse_level_pair(tags.get("level", ""))
         if not n.location.valid():
             return
         pt = tags.get("public_transport")
@@ -159,26 +184,35 @@ class SpatialIndex:
 
 class GraphBuilder(osmium.SimpleHandler):
     """Deuxième passe : construit le graphe piéton restreint aux abords des
-    arrêts (ANCHOR_BUFFER_M), avec vitesses/pénalités par type de voie."""
+    arrêts (ANCHOR_BUFFER_M), avec vitesses/pénalités par type de voie.
+    Chaque arête porte, en plus de son poids en secondes, un type
+    ("walk"/"steps"/"elevator") et éventuellement une paire de niveaux
+    (level="A;B" côté OSM), pour pouvoir reconstruire des instructions
+    ("prenez l'escalier", "ascenseur") plutôt qu'un simple temps total."""
 
-    def __init__(self, anchor_index: SpatialIndex, elevator_ids: set) -> None:
+    def __init__(self, anchor_index: SpatialIndex, elevator_ids: set, elevator_levels: Dict[int, Optional[Tuple[float, float]]]) -> None:
         super().__init__()
         self.anchor_index = anchor_index
         self.elevator_ids = elevator_ids
-        self.adj: Dict[int, List[Tuple[int, float]]] = defaultdict(list)
+        self.elevator_levels = elevator_levels
+        # adj[node] = [(neighbor, seconds, kind, level_pair_or_None), ...]
+        self.adj: Dict[int, List[Tuple]] = defaultdict(list)
         self.node_coords: Dict[int, Tuple[float, float]] = {}
         self.n_ways_kept = 0
 
     def _is_near_anchor(self, lon: float, lat: float) -> bool:
         return len(self.anchor_index.near(lon, lat, ANCHOR_BUFFER_M)) > 0
 
-    def _add_edge(self, a_id: int, a_lon: float, a_lat: float, b_id: int, b_lon: float, b_lat: float, seconds: float) -> None:
-        if a_id in self.elevator_ids or b_id in self.elevator_ids:
+    def _add_edge(self, a, b, seconds: float, kind: str, level: Optional[Tuple[float, float]]) -> None:
+        is_elevator = a.ref in self.elevator_ids or b.ref in self.elevator_ids
+        if is_elevator:
             seconds += ELEVATOR_PENALTY_S / 2
-        self.adj[a_id].append((b_id, seconds))
-        self.adj[b_id].append((a_id, seconds))
-        self.node_coords[a_id] = (a_lon, a_lat)
-        self.node_coords[b_id] = (b_lon, b_lat)
+            kind = "elevator"
+            level = self.elevator_levels.get(a.ref) or self.elevator_levels.get(b.ref) or level
+        self.adj[a.ref].append((b.ref, seconds, kind, level))
+        self.adj[b.ref].append((a.ref, seconds, kind, level))
+        self.node_coords[a.ref] = (a.location.lon, a.location.lat)
+        self.node_coords[b.ref] = (b.location.lon, b.location.lat)
 
     def way(self, w) -> None:
         tags = dict(w.tags)
@@ -194,6 +228,8 @@ class GraphBuilder(osmium.SimpleHandler):
         self.n_ways_kept += 1
         is_steps = hw == "steps"
         speed = STEPS_SPEED_MPS if is_steps else WALK_SPEED_MPS
+        kind = "steps" if is_steps else "walk"
+        level = parse_level_pair(tags.get("level", "")) if is_steps else None
         for i in range(len(nodes) - 1):
             a, b = nodes[i], nodes[i + 1]
             d = haversine_m(a.location.lon, a.location.lat, b.location.lon, b.location.lat)
@@ -202,11 +238,7 @@ class GraphBuilder(osmium.SimpleHandler):
             seconds = d / speed
             if is_steps and i == 0:
                 seconds += STEPS_PENALTY_S
-            self._add_edge(
-                a.ref, a.location.lon, a.location.lat,
-                b.ref, b.location.lon, b.location.lat,
-                seconds,
-            )
+            self._add_edge(a, b, seconds, kind, level)
 
 
 def snap_anchor(lon: float, lat: float, node_index: SpatialIndex) -> Optional[int]:
@@ -217,8 +249,9 @@ def snap_anchor(lon: float, lat: float, node_index: SpatialIndex) -> Optional[in
     return best
 
 
-def dijkstra(adj: Dict, source, cutoff_s: float) -> Dict:
+def dijkstra(adj: Dict, source, cutoff_s: float) -> Tuple[Dict, Dict]:
     dist = {source: 0.0}
+    prev: Dict = {}  # node -> (parent, kind, level, seconds)
     pq = [(0.0, source)]
     while pq:
         d, u = heapq.heappop(pq)
@@ -226,12 +259,40 @@ def dijkstra(adj: Dict, source, cutoff_s: float) -> Dict:
             continue
         if d > cutoff_s:
             continue
-        for v, w in adj.get(u, ()):
+        for v, w, kind, level in adj.get(u, ()):
             nd = d + w
             if nd <= cutoff_s and nd < dist.get(v, math.inf):
                 dist[v] = nd
+                prev[v] = (u, kind, level, w)
                 heapq.heappush(pq, (nd, v))
-    return dist
+    return dist, prev
+
+
+MIN_SEGMENT_S = 3  # segments plus courts fusionnés/ignorés (bruit du rattachement)
+
+
+def reconstruct_segments(prev: Dict, source, dest) -> List[List]:
+    """Reconstruit la suite d'arêtes de source à dest, puis fusionne les
+    arêtes consécutives de même type (et mêmes niveaux) en segments —
+    typiquement un long trottoir découpé en dizaines de ways OSM ne doit
+    donner qu'une seule ligne "à pied" dans l'instruction finale."""
+    edges = []
+    node = dest
+    guard = 0
+    while node != source and node in prev and guard < 5000:
+        guard += 1
+        parent, kind, level, w = prev[node]
+        edges.append((kind, level, w))
+        node = parent
+    edges.reverse()
+
+    segments: List[List] = []
+    for kind, level, w in edges:
+        if segments and segments[-1][0] == kind and segments[-1][1] == level:
+            segments[-1][2] += w
+        else:
+            segments.append([kind, level, w])
+    return [[k, list(lv) if lv else None, round(s)] for k, lv, s in segments if s >= MIN_SEGMENT_S or k != "walk"]
 
 
 def build_footpaths(anchors: Dict[str, Tuple[float, float]], graph: GraphBuilder) -> Dict[str, List[List]]:
@@ -250,8 +311,8 @@ def build_footpaths(anchors: Dict[str, Tuple[float, float]], graph: GraphBuilder
         n_snapped += 1
         d = haversine_m(lon, lat, *node_index.points[snapped]) / WALK_SPEED_MPS
         vkey = stop_node_key.format(sid)
-        adj[vkey].append((snapped, d))
-        adj[snapped].append((vkey, d))
+        adj[vkey].append((snapped, d, "walk", None))
+        adj[snapped].append((vkey, d, "walk", None))
 
     log(f"  arrêts rattachés au graphe piéton : {n_snapped}/{len(anchors)}")
 
@@ -260,7 +321,7 @@ def build_footpaths(anchors: Dict[str, Tuple[float, float]], graph: GraphBuilder
         vkey = stop_node_key.format(sid)
         if vkey not in adj:
             continue
-        dist = dijkstra(adj, vkey, TIME_CUTOFF_S)
+        dist, prev = dijkstra(adj, vkey, TIME_CUTOFF_S)
         others = []
         for key, seconds in dist.items():
             if not isinstance(key, str) or not key.startswith("stop:"):
@@ -272,7 +333,11 @@ def build_footpaths(anchors: Dict[str, Tuple[float, float]], graph: GraphBuilder
         if not others:
             continue
         others.sort(key=lambda x: x[1])
-        footpaths[sid] = [[oid, round(sec)] for oid, sec in others[:MAX_NEIGHBORS]]
+        kept = others[:MAX_NEIGHBORS]
+        footpaths[sid] = [
+            [oid, round(sec), reconstruct_segments(prev, vkey, stop_node_key.format(oid))]
+            for oid, sec in kept
+        ]
     return footpaths
 
 
@@ -307,7 +372,7 @@ def main() -> int:
         anchor_index = SpatialIndex(anchors)
 
         log("Passe 2/2 : construction du graphe piéton (abords des arrêts)")
-        graph = GraphBuilder(anchor_index, pass1.elevator_ids)
+        graph = GraphBuilder(anchor_index, pass1.elevator_ids, pass1.elevator_levels)
         graph.apply_file(tmp_path, locations=True)
         log(f"  ways retenues : {graph.n_ways_kept} | nœuds graphe : {len(graph.node_coords)}")
 

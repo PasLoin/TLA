@@ -632,19 +632,23 @@
       const byNeighbor = new Map();
       for (const [nid, d] of near) {
         if (nid === id) continue;
-        byNeighbor.set(nid, Math.round(d / WALK_SPEED_MPS) + TRANSFER_WALK_PENALTY_S);
+        // segments=null : pas de détail d'itinéraire pour l'estimation à vol
+        // d'oiseau (pas de tracé réel disponible pour cette paire).
+        byNeighbor.set(nid, [Math.round(d / WALK_SPEED_MPS) + TRANSFER_WALK_PENALTY_S, null]);
       }
       // Remplace (ou complète) l'estimation à vol d'oiseau par le temps réel
       // calculé sur le réseau piéton OSM (escaliers, ascenseurs...) quand il
       // est disponible pour cette paire — voir scripts/build_footpaths.py.
       const osmList = footpathsOsmData[id];
       if (osmList) {
-        for (const [nid, sec] of osmList) {
+        for (const [nid, sec, segments] of osmList) {
           if (nid === id) continue;
-          byNeighbor.set(nid, sec);
+          byNeighbor.set(nid, [sec, segments]);
         }
       }
-      if (byNeighbor.size) fp.set(id, Array.from(byNeighbor.entries()));
+      if (byNeighbor.size) {
+        fp.set(id, Array.from(byNeighbor.entries()).map(([nid, [sec, segments]]) => [nid, sec, segments]));
+      }
     }
     plannerState.footpaths = fp;
   }
@@ -783,12 +787,12 @@
         const t0 = roundArr[k].get(sid);
         const fps = plannerState.footpaths.get(sid);
         if (!fps) continue;
-        for (const [nsid, w] of fps) {
+        for (const [nsid, w, segments] of fps) {
           const t = t0 + w;
           if (t < (bestArr.get(nsid) ?? INF)) {
             roundArr[k].set(nsid, t);
             bestArr.set(nsid, t);
-            parents[k].set(nsid, { type: "walk", from: sid, walkSec: w });
+            parents[k].set(nsid, { type: "walk", from: sid, walkSec: w, segments });
             newMarked.add(nsid);
           }
         }
@@ -839,7 +843,7 @@
         return legs;
       }
       if (e.type === "walk") {
-        legs.unshift({ type: "walkTransfer", fromStop: e.from, toStop: sid, walkSec: e.walkSec });
+        legs.unshift({ type: "walkTransfer", fromStop: e.from, toStop: sid, walkSec: e.walkSec, segments: e.segments });
         sid = e.from;
         continue; // même round : le prédécesseur a été marqué par un ride du round k
       }
@@ -915,6 +919,35 @@
     return m >= 60 ? `${Math.floor(m / 60)} h ${pad2(m % 60)}` : `${m} min`;
   }
 
+  // Comme fmtDurationMin, mais garde les secondes en dessous d'une minute —
+  // utile pour les segments d'escalier/ascenseur (quelques dizaines de
+  // secondes), où arrondir à "1 min" serait trompeur.
+  function fmtDurationShort(sec) {
+    return sec < 60 ? `${Math.round(sec)} s` : fmtDurationMin(sec);
+  }
+
+  const WALK_SEGMENT_ICONS = { walk: "🚶", steps: "🪜", elevator: "🛗" };
+  const WALK_SEGMENT_LABELS = { walk: "à pied", steps: "escalier", elevator: "ascenseur" };
+
+  function fmtLevel(n) {
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
+  }
+
+  // Détail pas-à-pas d'une correspondance (voir data/footpaths.json /
+  // scripts/build_footpaths.py) — n'affiche quelque chose que si le trajet
+  // comporte au moins un escalier ou ascenseur ; une simple marche continue
+  // reste résumée par le temps total déjà affiché.
+  function formatWalkDetail(segments) {
+    if (!segments || !segments.some(([kind]) => kind !== "walk")) return null;
+    return segments
+      .map(([kind, level, sec]) => {
+        const label = WALK_SEGMENT_LABELS[kind] || "à pied";
+        const levelStr = level ? ` (niveau ${fmtLevel(level[0])} ↔ ${fmtLevel(level[1])})` : "";
+        return `${WALK_SEGMENT_ICONS[kind] || "🚶"} ${label}${levelStr} · ${fmtDurationShort(sec)}`;
+      })
+      .join("<br>");
+  }
+
   function stopName(id) {
     const s = stopsData[id];
     return s ? s.name : id;
@@ -948,7 +981,11 @@
         if (leg.type === "walkOrigin") {
           html += `<li class="leg leg-walk">🚶 ${fmtDurationMin(leg.walkSec)} à pied vers <b>${escapeHtml(stopName(leg.toStop))}</b></li>`;
         } else if (leg.type === "walkTransfer") {
-          html += `<li class="leg leg-walk">🚶 ${fmtDurationMin(leg.walkSec)} à pied vers <b>${escapeHtml(stopName(leg.toStop))}</b></li>`;
+          const detail = formatWalkDetail(leg.segments);
+          html +=
+            `<li class="leg leg-walk">🚶 ${fmtDurationMin(leg.walkSec)} à pied vers <b>${escapeHtml(stopName(leg.toStop))}</b>` +
+            (detail ? `<div class="leg-walk-detail">${detail}</div>` : "") +
+            `</li>`;
         } else {
           const r = routesData[leg.routeId] || {};
           const color = "#" + (r.color || "1d4ed8");
