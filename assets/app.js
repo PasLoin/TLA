@@ -807,11 +807,17 @@
       marked = newMarked;
     }
 
-    // Extraction des alternatives Pareto : pour chaque round, meilleure
-    // arrivée à destination (arrêt + marche finale) ; on ne garde que les
-    // rounds qui améliorent strictement l'arrivée.
-    const journeys = [];
-    let bestSoFar = INF;
+    // Extraction des alternatives : pour chaque round (= nombre de
+    // correspondances), meilleure arrivée à destination trouvée jusque-là.
+    // On ne garde plus seulement les rounds qui améliorent STRICTEMENT
+    // l'arrivée globale (ça ne laissait passer qu'une seule alternative la
+    // plupart du temps, la suivante n'étant presque jamais plus rapide) :
+    // chaque round qui apporte un résultat différent du précédent devient un
+    // candidat, quitte à arriver plus tard avec plus de correspondances —
+    // c'est justement ce qui permet de proposer un choix "direct mais plus
+    // lent" à côté du "plus rapide avec correspondance(s)".
+    const candidates = [];
+    let lastKey = null;
     for (let k = 1; k < roundArr.length; k++) {
       let best = null;
       for (const [sid, w] of destStops) {
@@ -820,21 +826,33 @@
         const tot = t + w;
         if (!best || tot < best.tot) best = { sid, walkSec: w, tot };
       }
-      if (best && best.tot < bestSoFar) {
-        const legs = reconstructJourney(parents, k, best.sid);
-        if (legs && legs.some((l) => l.type === "ride")) {
-          bestSoFar = best.tot;
-          journeys.push({
-            departure: depSec,
-            arrival: best.tot,
-            finalWalkSec: best.walkSec,
-            transfers: legs.filter((l) => l.type === "ride").length - 1,
-            legs,
-          });
-        }
+      if (!best) continue;
+      const key = `${best.sid}:${best.tot}`;
+      if (key === lastKey) continue; // rien de nouveau ce round-ci (hérité tel quel)
+      lastKey = key;
+      const legs = reconstructJourney(parents, k, best.sid);
+      if (legs && legs.some((l) => l.type === "ride")) {
+        candidates.push({
+          departure: depSec,
+          arrival: best.tot,
+          finalWalkSec: best.walkSec,
+          transfers: legs.filter((l) => l.type === "ride").length - 1,
+          legs,
+        });
       }
     }
-    return journeys;
+
+    // Filtre de Pareto (correspondances, heure d'arrivée) : élimine les
+    // candidats strictement dominés par un autre (plus de correspondances
+    // ET une arrivée pas meilleure) — sans ça, un round qui n'apporte rien
+    // (plus lent avec plus de correspondances) polluerait la liste.
+    return candidates.filter((j) =>
+      !candidates.some((o) =>
+        o !== j &&
+        o.transfers <= j.transfers && o.arrival <= j.arrival &&
+        (o.transfers < j.transfers || o.arrival < j.arrival)
+      )
+    );
   }
 
   // Remonte les pointeurs parents depuis (arrêt, round) jusqu'à l'origine.
