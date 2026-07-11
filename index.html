@@ -89,6 +89,11 @@
       </div>
       <p class="planner-hint" id="plannerHint">Choisis un départ et une arrivée sur la carte. La recherche part à la date/heure de la simulation ci-dessus.</p>
       <button id="plannerSearchBtn" class="btn planner-search" disabled>Rechercher un itinéraire</button>
+      <div id="plannerSort" class="btn-group planner-sort" hidden>
+        <button type="button" class="btn btn-sort btn-active" data-sort="arrival">🕐 Plus tôt</button>
+        <button type="button" class="btn btn-sort" data-sort="transfers">🔀 Moins de corresp.</button>
+        <button type="button" class="btn btn-sort" data-sort="walk">🚶 Moins de marche</button>
+      </div>
       <div id="plannerResults" class="planner-results"></div>
     </div>
 

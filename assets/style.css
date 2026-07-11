@@ -327,6 +327,12 @@ select { font-family: var(--font-body); cursor: pointer; }
   color: #fff;
 }
 
+.planner-sort .btn-sort {
+  font-size: 10.5px;
+  padding: 6px 4px;
+  text-align: center;
+}
+
 .planner-results {
   display: flex;
   flex-direction: column;

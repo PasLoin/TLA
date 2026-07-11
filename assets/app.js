@@ -572,7 +572,8 @@
     routesAtStop: null,  // Map stop_id -> [[patternIdx, posInPattern], ...]
     footpaths: null,     // Map stop_id -> [[stop_id, walkSec], ...]
     stopGrid: null,      // index spatial des arrêts
-    journeys: [],
+    journeys: [],        // alternatives brutes renvoyées par runRaptor (ordre RAPTOR : correspondances croissantes)
+    sortBy: "arrival",   // critère de tri actif : "arrival" | "transfers" | "walk"
   };
 
   function metersBetween(lat1, lon1, lat2, lon2) {
@@ -902,15 +903,43 @@
     }
 
     const journeys = runRaptor(originStops, destStops, depSec);
+    for (const j of journeys) j.totalWalkSec = journeyWalkSec(j);
     plannerState.journeys = journeys;
-    renderJourneys(
-      journeys,
+    const sortToggle = document.getElementById("plannerSort");
+    if (sortToggle) sortToggle.hidden = journeys.length < 2;
+    renderSortedJourneys(
       journeys.length
         ? null
         : "Aucun itinéraire trouvé à cette heure (essaie une autre heure ou d'autres points)."
     );
-    if (journeys.length) drawJourney(journeys[0]);
     if (resultsEl) resultsEl.scrollTop = 0;
+  }
+
+  // Durée totale de marche d'un itinéraire (accès + correspondances +
+  // marche finale) — utilisée par le critère de tri "Moins de marche".
+  function journeyWalkSec(j) {
+    let total = j.finalWalkSec || 0;
+    for (const leg of j.legs) {
+      if (leg.type === "walkOrigin" || leg.type === "walkTransfer") total += leg.walkSec;
+    }
+    return total;
+  }
+
+  const JOURNEY_SORTERS = {
+    arrival: (a, b) => a.arrival - b.arrival,
+    transfers: (a, b) => a.transfers - b.transfers || a.arrival - b.arrival,
+    walk: (a, b) => a.totalWalkSec - b.totalWalkSec || a.arrival - b.arrival,
+  };
+
+  // Retrie une copie de plannerState.journeys selon le critère actif et
+  // rafraîchit la liste + le tracé (toujours la première alternative du tri
+  // courant). Les alternatives elles-mêmes restent celles calculées par
+  // runRaptor (front de Pareto correspondances/heure d'arrivée) — seul
+  // l'ordre d'affichage change.
+  function renderSortedJourneys(emptyMessage) {
+    const sorted = [...plannerState.journeys].sort(JOURNEY_SORTERS[plannerState.sortBy] || JOURNEY_SORTERS.arrival);
+    renderJourneys(sorted, emptyMessage);
+    if (sorted.length) drawJourney(sorted[0]);
   }
 
   // ---- Rendu des résultats -------------------------------------------------
@@ -978,10 +1007,11 @@
       const dur = j.arrival - j.departure;
       const transfersLabel =
         j.transfers === 0 ? "direct" : `${j.transfers} corresp.`;
+      const walkLabel = `🚶 ${fmtDurationMin(j.totalWalkSec || 0)}`;
       let html =
         `<div class="journey-head">` +
         `<span class="journey-times">${fmtHM(j.departure)} → ${fmtHM(j.arrival)}</span>` +
-        `<span class="journey-meta">${fmtDurationMin(dur)} · ${transfersLabel}</span>` +
+        `<span class="journey-meta">${fmtDurationMin(dur)} · ${transfersLabel} · ${walkLabel}</span>` +
         `</div><ul class="journey-legs">`;
       for (const leg of j.legs) {
         if (leg.type === "walkOrigin") {
@@ -1190,10 +1220,16 @@
     plannerState.originMarker = plannerState.destMarker = null;
     plannerState.origin = plannerState.dest = null;
     plannerState.journeys = [];
+    plannerState.sortBy = "arrival";
     if (plannerState.picking) setPickMode(plannerState.picking);
     clearJourneyDrawing();
     const el = document.getElementById("plannerResults");
     if (el) el.innerHTML = "";
+    const sortToggle = document.getElementById("plannerSort");
+    if (sortToggle) {
+      sortToggle.hidden = true;
+      sortToggle.querySelectorAll(".btn-sort").forEach((b) => b.classList.toggle("btn-active", b.dataset.sort === "arrival"));
+    }
     const searchBtn = document.getElementById("plannerSearchBtn");
     if (searchBtn) searchBtn.disabled = true;
     const hint = document.getElementById("plannerHint");
@@ -1870,6 +1906,17 @@
     if (plannerDestBtn) plannerDestBtn.addEventListener("click", () => setPickMode("dest"));
     if (plannerSearchBtn) plannerSearchBtn.addEventListener("click", planJourneys);
     if (plannerClearBtn) plannerClearBtn.addEventListener("click", clearPlanner);
+
+    const plannerSort = document.getElementById("plannerSort");
+    if (plannerSort) {
+      plannerSort.querySelectorAll(".btn-sort").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          plannerState.sortBy = btn.dataset.sort;
+          plannerSort.querySelectorAll(".btn-sort").forEach((b) => b.classList.toggle("btn-active", b === btn));
+          renderSortedJourneys(null);
+        });
+      });
+    }
     map.on("click", (e) => {
       if (plannerState.picking) placePlannerPoint(e.lngLat);
     });
