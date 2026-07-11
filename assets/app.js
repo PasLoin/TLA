@@ -27,6 +27,9 @@
        (optionnel — dérivé d'OSM, voir scripts/build_stop_modes.py ; absent
        tant que le pipeline ne l'a pas généré, les arrêts non couverts
        gardent la couleur par défaut)
+     platforms.json : { meta, platforms: [ {stop_ids, modes, closed, coords}, ... ] }
+       (optionnel — géométrie réelle des quais depuis OSM, voir
+       scripts/build_platforms.py ; affiché uniquement à fort zoom)
 
    --------------------------------------------------------------------------
    Planificateur d'itinéraire (RAPTOR)
@@ -203,6 +206,7 @@
   let routesData = {};
   let stopsData = {};
   let stopModesData = {}; // stop_id -> ["bus","tram",...] — voir data/stop_modes.json
+  let platformsData = []; // [{stop_ids, modes, closed, coords}, ...] — voir data/platforms.json
   let shapesData = {};
   let calendarData = [];
   let exceptionsByDate = new Map(); // 'YYYYMMDD' -> {added:Set, removed:Set}
@@ -282,6 +286,14 @@
       stopModesData = stopModes.modes || {};
     } catch (e) {
       stopModesData = {};
+    }
+
+    // Optionnel : géométrie réelle des quais (voir scripts/build_platforms.py).
+    try {
+      const platforms = await fetchJSON("platforms.json");
+      platformsData = platforms.platforms || [];
+    } catch (e) {
+      platformsData = [];
     }
 
     routesData = routes;
@@ -1417,13 +1429,16 @@
     );
   }
 
-  function colorForStopModes(id) {
-    const modes = stopModesData[id];
+  function colorForModes(modes) {
     if (!modes || !modes.length) return STOP_MODE_DEFAULT_COLOR;
     for (const mode of STOP_MODE_PRIORITY) {
       if (modes.includes(mode)) return STOP_MODE_COLORS[mode];
     }
     return STOP_MODE_DEFAULT_COLOR;
+  }
+
+  function colorForStopModes(id) {
+    return colorForModes(stopModesData[id]);
   }
 
   function addStopsLayer() {
@@ -1479,6 +1494,39 @@
     });
     map.on("mouseenter", "stops-layer", () => { map.getCanvas().style.cursor = "pointer"; });
     map.on("mouseleave", "stops-layer", () => { map.getCanvas().style.cursor = ""; });
+  }
+
+  // Géométrie réelle des quais (issue d'OSM, voir scripts/build_platforms.py).
+  // Ne se voit qu'à partir d'un fort niveau de zoom (minzoom) — à l'échelle
+  // de la ville, un quai de 30 m n'est de toute façon pas visible et ne fait
+  // qu'ajouter du bruit à la source GeoJSON.
+  function addPlatformsLayer() {
+    if (!platformsData.length) return;
+    const features = platformsData.map((p) => ({
+      type: "Feature",
+      properties: { color: colorForModes(p.modes) },
+      geometry: p.closed
+        ? { type: "Polygon", coordinates: [p.coords] }
+        : { type: "LineString", coordinates: p.coords },
+    }));
+    map.addSource("platforms", { type: "geojson", data: { type: "FeatureCollection", features } });
+    map.addLayer({
+      id: "platforms-fill",
+      type: "fill",
+      source: "platforms",
+      filter: ["==", ["geometry-type"], "Polygon"],
+      minzoom: 15,
+      layout: { visibility: "none" },
+      paint: { "fill-color": ["get", "color"], "fill-opacity": 0.35 },
+    });
+    map.addLayer({
+      id: "platforms-outline",
+      type: "line",
+      source: "platforms",
+      minzoom: 15,
+      layout: { visibility: "none" },
+      paint: { "line-color": ["get", "color"], "line-width": 2, "line-opacity": 0.85 },
+    });
   }
 
   function addVehiclesLayer() {
@@ -1699,6 +1747,11 @@
       if (map.getLayer("stops-layer")) {
         map.setLayoutProperty("stops-layer", "visibility", state.stopsVisible ? "visible" : "none");
       }
+      for (const id of ["platforms-fill", "platforms-outline"]) {
+        if (map.getLayer(id)) {
+          map.setLayoutProperty(id, "visibility", state.stopsVisible ? "visible" : "none");
+        }
+      }
     });
 
     const stopsNamesToggle = document.getElementById("stopsNamesToggle");
@@ -1782,6 +1835,7 @@
     await mapReady;
 
     addStopsLayer();
+    addPlatformsLayer();
     addVehiclesLayer();
     addRealtimeLayer();
     addJourneyLayer();
