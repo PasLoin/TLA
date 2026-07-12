@@ -920,8 +920,41 @@
       return;
     }
 
-    const journeys = runRaptor(originStops, destStops, depSec);
-    for (const j of journeys) j.totalWalkSec = journeyWalkSec(j);
+    // Une passe RAPTOR ne renvoie qu'un itinéraire par nombre de
+    // correspondances (front de Pareto) — souvent un seul au total. Pour
+    // offrir un vrai choix (~3 options), on relance la recherche avec un
+    // départ décalé juste après le premier véhicule utilisé : chaque passe
+    // supplémentaire produit le "départ suivant", comme dans un
+    // planificateur classique.
+    const journeys = [];
+    const seen = new Set();
+    let searchDep = depSec;
+    for (let attempt = 0; attempt < 5 && journeys.length < 3; attempt++) {
+      const batch = runRaptor(originStops, destStops, searchDep);
+      if (!batch.length) break;
+      let earliestBoard = Infinity;
+      for (const j of batch) {
+        const firstRide = j.legs.find((l) => l.type === "ride");
+        if (!firstRide) continue;
+        earliestBoard = Math.min(earliestBoard, firstRide.depSec);
+        // Heure de départ affichée : partir juste à temps pour attraper le
+        // premier véhicule (marche d'accès comprise) plutôt qu'à l'heure de
+        // la recherche — sinon les alternatives suivantes verraient leur
+        // durée gonflée par l'attente avant de partir.
+        const walkO = j.legs[0].type === "walkOrigin" ? j.legs[0].walkSec : 0;
+        j.departure = Math.max(depSec, firstRide.depSec - walkO);
+        const key = j.legs
+          .filter((l) => l.type === "ride")
+          .map((l) => `${l.routeId}:${l.boardStop}:${l.depSec}:${l.alightStop}`)
+          .join("|");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        j.totalWalkSec = journeyWalkSec(j);
+        journeys.push(j);
+      }
+      if (!isFinite(earliestBoard)) break;
+      searchDep = earliestBoard + 60; // la passe suivante rate ce véhicule → départ d'après
+    }
     plannerState.journeys = journeys;
     const sortToggle = document.getElementById("plannerSort");
     if (sortToggle) sortToggle.hidden = journeys.length < 2;
@@ -951,9 +984,9 @@
 
   // Retrie une copie de plannerState.journeys selon le critère actif et
   // rafraîchit la liste + le tracé (toujours la première alternative du tri
-  // courant). Les alternatives elles-mêmes restent celles calculées par
-  // runRaptor (front de Pareto correspondances/heure d'arrivée) — seul
-  // l'ordre d'affichage change.
+  // courant). Les alternatives elles-mêmes sont celles accumulées par
+  // planJourneys (passes RAPTOR successives) — seul l'ordre d'affichage
+  // change.
   function renderSortedJourneys(emptyMessage) {
     const sorted = [...plannerState.journeys].sort(JOURNEY_SORTERS[plannerState.sortBy] || JOURNEY_SORTERS.arrival);
     renderJourneys(sorted, emptyMessage);
@@ -1208,18 +1241,15 @@
     }
   }
 
-  function placePlannerPoint(lngLat) {
-    const mode = plannerState.picking;
-    if (!mode) return;
-    const point = { lon: lngLat.lng, lat: lngLat.lat };
-    const isOrigin = mode === "origin";
+  // Pose un point du planificateur (marqueur + état), quel que soit le
+  // moyen utilisé pour l'obtenir (clic carte ou géolocalisation).
+  function setPlannerPoint(isOrigin, point) {
     const markerKey = isOrigin ? "originMarker" : "destMarker";
     if (plannerState[markerKey]) plannerState[markerKey].remove();
     plannerState[markerKey] = new maplibregl.Marker({ color: isOrigin ? "#4ade80" : "#ef4444" })
       .setLngLat([point.lon, point.lat])
       .addTo(map);
     plannerState[isOrigin ? "origin" : "dest"] = point;
-    setPickMode(mode); // désactive le mode après placement
 
     const hint = document.getElementById("plannerHint");
     const searchBtn = document.getElementById("plannerSearchBtn");
@@ -1230,6 +1260,37 @@
         ? "Prêt — la recherche part à la date/heure de la simulation ci-dessus."
         : (isOrigin ? "Départ placé. Place maintenant l'arrivée." : "Arrivée placée. Place maintenant le départ.");
     }
+  }
+
+  function placePlannerPoint(lngLat) {
+    const mode = plannerState.picking;
+    if (!mode) return;
+    setPickMode(mode); // désactive le mode après placement
+    setPlannerPoint(mode === "origin", { lon: lngLat.lng, lat: lngLat.lat });
+  }
+
+  // Géolocalisation de l'appareil comme point de départ du planificateur.
+  function usePositionAsOrigin() {
+    const hint = document.getElementById("plannerHint");
+    const btn = document.getElementById("plannerGeoBtn");
+    if (!navigator.geolocation) {
+      if (hint) hint.textContent = "Géolocalisation non disponible sur cet appareil.";
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = "📡 Localisation…"; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (btn) { btn.disabled = false; btn.textContent = "📡 Partir de ma position"; }
+        const point = { lon: pos.coords.longitude, lat: pos.coords.latitude };
+        setPlannerPoint(true, point);
+        map.flyTo({ center: [point.lon, point.lat], zoom: Math.max(map.getZoom(), 14) });
+      },
+      () => {
+        if (btn) { btn.disabled = false; btn.textContent = "📡 Partir de ma position"; }
+        if (hint) hint.textContent = "Position introuvable (autorisation refusée ?). Place le départ à la main.";
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+    );
   }
 
   function clearPlanner() {
@@ -1563,6 +1624,15 @@
     window.__stibMap = map;
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    // Point bleu "ma position" natif MapLibre (suivi continu possible).
+    map.addControl(
+      new maplibregl.GeolocateControl({
+        positionOptions: { enableHighAccuracy: true },
+        trackUserLocation: true,
+        showUserHeading: true,
+      }),
+      "top-right"
+    );
     map.addControl(
       new maplibregl.AttributionControl({
         compact: true,
@@ -1924,6 +1994,11 @@
     if (plannerDestBtn) plannerDestBtn.addEventListener("click", () => setPickMode("dest"));
     if (plannerSearchBtn) plannerSearchBtn.addEventListener("click", planJourneys);
     if (plannerClearBtn) plannerClearBtn.addEventListener("click", clearPlanner);
+    const plannerGeoBtn = document.getElementById("plannerGeoBtn");
+    if (plannerGeoBtn) {
+      if (!navigator.geolocation) plannerGeoBtn.disabled = true;
+      else plannerGeoBtn.addEventListener("click", usePositionAsOrigin);
+    }
 
     const plannerSort = document.getElementById("plannerSort");
     if (plannerSort) {
@@ -1942,6 +2017,18 @@
     panelToggle.addEventListener("click", () => {
       document.body.classList.toggle("panel-collapsed");
     });
+
+    // Sur mobile le panneau devient un volet en bas d'écran : replié par
+    // défaut (la carte d'abord), et son en-tête sert de poignée tap pour
+    // l'ouvrir/refermer sans chercher le petit bouton flottant.
+    const mobileMq = window.matchMedia("(max-width: 640px)");
+    if (mobileMq.matches) document.body.classList.add("panel-collapsed");
+    const panelHead = document.querySelector(".panel-head");
+    if (panelHead) {
+      panelHead.addEventListener("click", () => {
+        if (mobileMq.matches) document.body.classList.toggle("panel-collapsed");
+      });
+    }
 
     const realtimeBtn = document.getElementById("realtimeBtn");
     const realtimeClearBtn = document.getElementById("realtimeClearBtn");

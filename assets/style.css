@@ -168,6 +168,9 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* Écrans bas : le panneau ne doit jamais déborder de la fenêtre. */
+  max-height: calc(100vh - 190px);
+  overflow-y: auto;
 }
 
 .field-row {
@@ -438,8 +441,26 @@ body.panel-collapsed .panel-toggle-icon { transform: rotate(-90deg); }
 
 @media (max-width: 640px) {
   .panel-toggle { display: flex; }
-  .panel { width: calc(100vw - 32px); }
-  body.panel-collapsed .panel { display: none; }
+  /* Volet en bas d'écran plutôt que carte masquée aux 3/4 : la carte reste
+     l'élément principal, le panneau se déplie par-dessus quand on en a
+     besoin. */
+  .panel {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 14px 14px 0 0;
+    border-bottom: none;
+    animation: none;
+  }
+  .panel-head { cursor: pointer; padding: 10px 18px 8px; }
+  .panel-body { max-height: 48vh; }
+  .planner-results { max-height: 26vh; }
+  /* Replié : seul l'en-tête (horloge + statut) reste visible, en bandeau. */
+  body.panel-collapsed .panel-body,
+  body.panel-collapsed .panel-foot { display: none; }
 }
 
 /* ---------------- Loading overlay ---------------- */
@@ -618,5 +639,6 @@ body.panel-collapsed .panel-toggle-icon { transform: rotate(-90deg); }
 }
 
 @media (max-width: 640px) {
-  .board { left: 16px; right: 16px; width: auto; bottom: 16px; }
+  /* Passe au-dessus du volet bas (replié ~70px de haut) pour rester lisible. */
+  .board { left: 16px; right: 16px; width: auto; bottom: 84px; z-index: 7; }
 }
