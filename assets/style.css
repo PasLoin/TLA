@@ -211,8 +211,7 @@ select {
 input[type="date"]:focus-visible,
 input[type="time"]:focus-visible,
 select:focus-visible,
-.btn:focus-visible,
-.panel-toggle:focus-visible {
+.btn:focus-visible {
   outline: 2px solid var(--accent);
 }
 
@@ -415,32 +414,21 @@ select { font-family: var(--font-body); cursor: pointer; }
 .leg-detail { flex: 1; }
 .leg-nstops { color: var(--text-faint); }
 
-/* ---------------- Panel toggle (mobile) ---------------- */
+/* ---------------- Repli du panneau (mobile) ---------------- */
 
-.panel-toggle {
-  position: absolute;
-  z-index: 6;
-  top: 16px;
-  right: 16px;
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  border: 1px solid var(--line);
-  background: rgba(20, 24, 31, 0.92);
-  color: var(--text);
-  font-size: 16px;
-  cursor: pointer;
+/* Chevron dans l'en-tête du panneau : indique que l'en-tête sert de
+   poignée tap sur mobile. Masqué sur desktop (panneau toujours ouvert). */
+.panel-chevron {
   display: none;
-  align-items: center;
-  justify-content: center;
+  float: right;
+  color: var(--text-faint);
+  font-size: 14px;
+  transition: transform 0.2s ease;
 }
-
-.panel-toggle-icon { transition: transform 0.2s ease; }
-.panel.collapsed ~ .panel-toggle .panel-toggle-icon,
-body.panel-collapsed .panel-toggle-icon { transform: rotate(-90deg); }
+body.panel-collapsed .panel-chevron { transform: rotate(180deg); }
 
 @media (max-width: 640px) {
-  .panel-toggle { display: flex; }
+  .panel-chevron { display: block; }
   /* Volet en bas d'écran plutôt que carte masquée aux 3/4 : la carte reste
      l'élément principal, le panneau se déplie par-dessus quand on en a
      besoin. */

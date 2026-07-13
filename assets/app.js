@@ -1919,7 +1919,6 @@
     const playPauseBtn = document.getElementById("playPauseBtn");
     const nowBtn = document.getElementById("nowBtn");
     const stopsToggle = document.getElementById("stopsToggle");
-    const panelToggle = document.getElementById("panelToggle");
 
     dateInput.value = isoDateInput(state.simTime);
     timeInput.value = isoTimeInput(state.simTime);
@@ -2014,13 +2013,10 @@
       if (plannerState.picking) placePlannerPoint(e.lngLat);
     });
 
-    panelToggle.addEventListener("click", () => {
-      document.body.classList.toggle("panel-collapsed");
-    });
-
     // Sur mobile le panneau devient un volet en bas d'écran : replié par
     // défaut (la carte d'abord), et son en-tête sert de poignée tap pour
-    // l'ouvrir/refermer sans chercher le petit bouton flottant.
+    // l'ouvrir/refermer (pas de bouton flottant : il masquait le zoom
+    // MapLibre en haut à droite).
     const mobileMq = window.matchMedia("(max-width: 640px)");
     if (mobileMq.matches) document.body.classList.add("panel-collapsed");
     const panelHead = document.querySelector(".panel-head");
