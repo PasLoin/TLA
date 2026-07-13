@@ -137,8 +137,8 @@
     });
   }
 
-  function getTurnstileToken() {
-    return waitForTurnstile(5000).then(() => new Promise((resolve, reject) => {
+  function executeTurnstileOnce() {
+    return new Promise((resolve, reject) => {
       ensureTurnstileWidget();
       if (turnstileWidgetId === null) {
         reject(new Error("Turnstile indisponible (widget non initialisé)"));
@@ -146,7 +146,25 @@
       }
       turnstilePending = { resolve, reject };
       turnstile.execute(turnstileWidgetId);
-    }));
+    });
+  }
+
+  function getTurnstileToken() {
+    return waitForTurnstile(5000)
+      .then(executeTurnstileOnce)
+      .catch((err) => {
+        // Un widget dont le challenge a échoué reste bloqué en état d'erreur :
+        // sans reset, tous les execute() suivants échouent aussi (l'échec
+        // transitoire devient définitif jusqu'au rechargement de la page).
+        // On repart d'un widget propre et on retente une seule fois.
+        if (turnstileWidgetId === null || typeof turnstile === "undefined") throw err;
+        try {
+          turnstile.reset(turnstileWidgetId);
+        } catch {
+          throw err;
+        }
+        return executeTurnstileOnce();
+      });
   }
 
   function readCachedSessionToken() {
@@ -1422,7 +1440,11 @@
       }
     } catch (err) {
       console.error(err);
-      if (status) status.textContent = "Échec de la récupération (voir la console).";
+      if (status) {
+        status.textContent = /turnstile/i.test(err && err.message ? err.message : "")
+          ? "Vérification anti-bot refusée par le navigateur. Réessaie ; si ça persiste, désactive la protection stricte / navigation privée pour ce site."
+          : "Échec de la récupération (voir la console).";
+      }
     } finally {
       realtimeState.fetching = false;
       if (btn) { btn.disabled = false; btn.textContent = "Récupérer le temps réel"; }
