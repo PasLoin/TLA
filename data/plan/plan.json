@@ -1,0 +1,71 @@
+{
+ "generated_at": "2026-10-25T01:53:07+00:00",
+ "feed_version": "2_23_20261012_010701",
+ "route_types": [
+  1,
+  0
+ ],
+ "default": "octilinear",
+ "variants": [
+  {
+   "id": "octilinear",
+   "label": "Octilinéaire",
+   "url": "plan/octilinear.pmtiles",
+   "vehicles": false,
+   "veil": 0.88,
+   "min_zoom": 10,
+   "max_zoom": 17,
+   "bounds": [
+    4.2627,
+    50.77816,
+    4.52637,
+    50.91689
+   ]
+  },
+  {
+   "id": "geo-octilinear",
+   "label": "Géo-octilinéaire",
+   "url": "plan/geo-octilinear.pmtiles",
+   "vehicles": false,
+   "veil": 0.88,
+   "min_zoom": 10,
+   "max_zoom": 17,
+   "bounds": [
+    4.2627,
+    50.77816,
+    4.52637,
+    50.91689
+   ]
+  },
+  {
+   "id": "orthoradial",
+   "label": "Orthoradial",
+   "url": "plan/orthoradial.pmtiles",
+   "vehicles": false,
+   "veil": 0.88,
+   "min_zoom": 10,
+   "max_zoom": 17,
+   "bounds": [
+    4.2627,
+    50.77816,
+    4.50439,
+    50.91689
+   ]
+  },
+  {
+   "id": "geographic",
+   "label": "Géographique",
+   "url": "plan/geographic.pmtiles",
+   "vehicles": true,
+   "veil": 0.45,
+   "min_zoom": 10,
+   "max_zoom": 17,
+   "bounds": [
+    4.2627,
+    50.77816,
+    4.52637,
+    50.91689
+   ]
+  }
+ ]
+}

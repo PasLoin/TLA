@@ -4,7 +4,12 @@ name: Update GTFS data
 on:
   schedule:
     - cron: "0 3 * * *"
-  workflow_dispatch: {} # 
+  workflow_dispatch:
+    inputs:
+      rebuild_plan:
+        description: "Régénérer le plan schématique même si le GTFS n'a pas changé"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -18,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -32,19 +37,67 @@ jobs:
         id: gtfs
         run: python scripts/fetch_and_process.py
 
+      - name: Decide plan rebuild
+        id: plan
+        run: |
+          if [ "${{ steps.gtfs.outputs.changed }}" = "true" ] \
+             || [ "${{ inputs.rebuild_plan }}" = "true" ] \
+             || [ ! -f data/plan/plan.json ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve loom revision
+        id: loom-rev
+        if: steps.plan.outputs.build == 'true'
+        run: echo "sha=$(git ls-remote https://github.com/ad-freiburg/loom.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache loom binaries
+        id: loom-cache
+        if: steps.plan.outputs.build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.loom/bin
+          key: loom-transitmap-${{ runner.os }}-${{ steps.loom-rev.outputs.sha }}
+
+      - name: Build loom (topo, loom, octi, transitmap)
+        if: steps.plan.outputs.build == 'true' && steps.loom-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake libbz2-dev zlib1g-dev
+          git clone --recurse-submodules https://github.com/ad-freiburg/loom.git /tmp/loom
+          git -C /tmp/loom checkout ${{ steps.loom-rev.outputs.sha }}
+          git -C /tmp/loom submodule update --init --recursive
+          cmake -S /tmp/loom -B /tmp/loom/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/loom/build --target topo loom octi transitmap -j"$(nproc)"
+          mkdir -p ~/.loom/bin
+          cp /tmp/loom/build/topo /tmp/loom/build/loom /tmp/loom/build/octi /tmp/loom/build/transitmap ~/.loom/bin/
+
+      - name: Build transit plan
+        id: plan-build
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          if LOOM_BIN="$HOME/.loom/bin" python scripts/build_transit_plan.py; then
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=Plan schématique::non régénéré, la version précédente de data/plan/ est conservée"
+            echo "built=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Commit & push if changed
-        if: steps.gtfs.outputs.changed == 'true'
+        if: steps.gtfs.outputs.changed == 'true' || steps.plan-build.outputs.built == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
           if git diff --cached --quiet; then
-            echo "Rien à committer (diff vide malgré changed=true)."
+            echo "Rien à committer."
           else
             git commit -m "chore: update GTFS data ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
             git push
           fi
 
       - name: No changes
-        if: steps.gtfs.outputs.changed != 'true'
+        if: steps.gtfs.outputs.changed != 'true' && steps.plan-build.outputs.built != 'true'
         run: echo "Flux GTFS inchangé, rien à publier aujourd'hui."

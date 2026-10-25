@@ -1663,6 +1663,7 @@
 
     stopsToggle.addEventListener("change", () => {
       state.stopsVisible = stopsToggle.checked;
+      if (window.StibPlan && window.StibPlan.hidesGeography()) return;
       if (map.getLayer("stops-layer")) {
         map.setLayoutProperty("stops-layer", "visibility", state.stopsVisible ? "visible" : "none");
       }
@@ -1671,6 +1672,7 @@
     const stopsNamesToggle = document.getElementById("stopsNamesToggle");
     if (stopsNamesToggle) {
       stopsNamesToggle.addEventListener("change", () => {
+        if (window.StibPlan && window.StibPlan.hidesGeography()) return;
         if (map.getLayer("stops-labels")) {
           map.setLayoutProperty(
             "stops-labels",
@@ -1722,6 +1724,28 @@
     setInterval(setStatusMode, 1000);
   }
 
+  const GEO_LAYER_IDS = [
+    "stops-layer",
+    "stops-labels",
+    "vehicles-circle",
+    "vehicles-label",
+    "vehicles-realtime-circle",
+    "journey-line",
+    "journey-walk",
+  ];
+
+  function restoreGeoLayers() {
+    const show = (id, on) => {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+    };
+    const namesToggle = document.getElementById("stopsNamesToggle");
+    show("stops-layer", !!state.stopsVisible);
+    show("stops-labels", !!(namesToggle && namesToggle.checked));
+    for (const id of ["vehicles-circle", "vehicles-label", "vehicles-realtime-circle", "journey-line", "journey-walk"]) {
+      show(id, true);
+    }
+  }
+
   // ------------------------------------------------------------------------
   // Démarrage
   // ------------------------------------------------------------------------
@@ -1752,6 +1776,13 @@
     addVehiclesLayer();
     addRealtimeLayer();
     addJourneyLayer();
+    if (window.StibPlan) {
+      window.StibPlan.init(map, {
+        beforeId: "stops-layer",
+        geoLayers: GEO_LAYER_IDS,
+        restore: restoreGeoLayers,
+      });
+    }
     vehiclesLoaded = true;
     document.getElementById("loadingOverlay").classList.add("hidden");
 
