@@ -1,2 +1,5 @@
 requests>=2.31
 numpy>=1.26
+shapely>=2.0
+pmtiles>=3.4
+mapbox-vector-tile>=2.1
