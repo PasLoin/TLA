@@ -12,6 +12,7 @@
 
 <link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet" />
 <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
 
 <link rel="stylesheet" href="assets/style.css" />
 </head>
@@ -80,6 +81,14 @@
       <span>Afficher les noms des arrêts</span>
     </label>
 
+    <div class="plan-block" id="planBlock" hidden>
+      <label class="field">
+        <span class="field-label">Plan du réseau (métro + tram)</span>
+        <select id="planSelect" aria-describedby="planStatus"></select>
+      </label>
+      <p class="plan-status" id="planStatus"></p>
+    </div>
+
     <div class="planner-block">
       <p class="field-label">Planificateur d'itinéraire</p>
       <div class="btn-group">
@@ -137,6 +146,7 @@
 
 <div id="turnstile-widget"></div>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<script src="assets/plan.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>
